@@ -1,7 +1,7 @@
 <?php
 
 /*
- * ispconfig-sso — panel single sign-on for ISPConfig (companion module).
+ * ispconfig-sso — one-time panel login tokens for ISPConfig.
  * Copyright (c) 2026 Wade Beckett. GPLv3 — see ../../../../LICENSE.
  *
  * Makes this module's remote function grantable in the panel UI.
@@ -30,4 +30,10 @@ if (!defined('ISPC_ROOT_PATH') && PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
 	die();
 }
 
-$function_list['connect_sso_token_create'] = 'ISPConfig Connect: panel single sign-on (SSO token)';
+//* The KEY is the grant itself and must never change: it is the remote function
+//* name, it is what checkPerm() matches, and it is the literal string already
+//* stored in remote_user.remote_functions on every panel this is installed on.
+//* The VALUE is display-only, so it is safe to reword — and it is deliberately
+//* worded without any billing system's name in it. Whoever ticks this box may
+//* be integrating from WHMCS, Blesta, FOSSBilling or a script of their own.
+$function_list['connect_sso_token_create'] = 'Panel single sign-on (one-time login token)';

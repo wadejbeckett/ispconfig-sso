@@ -1,4 +1,4 @@
--- ispconfig-sso — panel single sign-on for ISPConfig (companion module).
+-- ispconfig-sso — one-time panel login tokens for ISPConfig.
 -- Copyright (c) 2026 Wade Beckett. GPLv3 — see ../LICENSE.
 --
 -- Applied by bin/connectsso_schema.php --drop (uninstall.sh).

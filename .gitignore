@@ -1,0 +1,15 @@
+# Agent / editor / tooling runtime state - never belongs in a public repo.
+.claude/
+.omc/
+.remember/
+.vscode/
+.idea/
+*.swp
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Local build or test output
+/build/
+*.log

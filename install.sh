@@ -2,11 +2,12 @@
 #
 # ispconfig-sso — installer.
 #
-# The optional ISPConfig-side half of single sign-on. It adds ONE remote API
-# function that mints a short-lived, single-use panel-login token, and one page
-# that redeems it. A billing system (ISPConfig Connect for WHMCS, or anything
-# else) can then offer a working "Log in to panel" button without ever storing
-# or replaying a customer's password.
+# A single sign-on provider for ISPConfig. It adds ONE remote API function that
+# mints a short-lived, single-use panel-login token, and one page that redeems
+# it. Any caller holding a granted ISPConfig remote-API session — a billing
+# system, a support desk, an in-house script — can then offer a working
+# "Log in to panel" button without ever storing or replaying a customer's
+# panel password.
 #
 # It deploys ONE directory:
 #   interface/web/connectsso  ->  <ispconfig>/interface/web/connectsso
@@ -34,7 +35,7 @@
 #     ISPCONFIG_ROOT defaults to /usr/local/ispconfig
 #
 # AFTER INSTALLING you must still grant the function: System > Remote Users >
-# your API user > Functions > tick "ISPConfig Connect: panel single sign-on".
+# your API user > Functions > tick "Panel single sign-on (one-time login token)".
 # Nothing can use SSO until that box is ticked — the installer deliberately does
 # not grant permissions on an operator's behalf.
 #
@@ -212,13 +213,14 @@ say "Done. Two steps remain, and neither can be done for you:"
 say
 say "  1. Grant the function to your API user:"
 say "     System > Remote Users > (your user) > Functions >"
-say "     tick 'ISPConfig Connect: panel single sign-on (SSO token)' > Save."
+say "     tick 'Panel single sign-on (one-time login token)' > Save."
 say "     If the box is not there, log out and back in first — the checkbox list"
 say "     is built from the module list of the admin who is logged in."
 say
-say "  2. Point your billing system at this panel. ISPConfig Connect for WHMCS"
-say "     detects the companion by itself (one get_function_list call) and shows"
-say "     its SSO buttons only once it is present and granted."
+say "  2. Point your billing system (or your own code) at this panel. The"
+say "     function to call is 'connect_sso_token_create'; a client can detect"
+say "     that it is installed with one 'get_function_list' call. README.md has"
+say "     the full API contract and a copy-and-paste PHP example."
 say
 say
 say "REQUIREMENT: serve the panel over HTTPS. A token is a password substitute in"

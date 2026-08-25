@@ -1,7 +1,7 @@
 <?php
 
 /*
- * ispconfig-sso — panel single sign-on for ISPConfig (companion module).
+ * ispconfig-sso — one-time panel login tokens for ISPConfig.
  * Copyright (c) 2026 Wade Beckett.
  *
  * This program is free software: you can redistribute it and/or modify it
@@ -33,10 +33,13 @@
  *
  * WHY THIS MODULE EXISTS: ISPConfig core has no one-time-login API.
  * client_login_get() only validates credentials, and login($u, $p, true) mints
- * an API session, not a panel session. Without something like this, a billing
- * system's "Log in to panel" button can only be implemented by storing and
- * replaying the customer's password — which is exactly what the abandoned
- * WHMCS modules did, and exactly what this module exists to make unnecessary.
+ * an API session, not a panel session. Without something like this, any
+ * "Log in to panel" button — in a billing system, a support desk, an in-house
+ * script — can only be implemented by storing the customer's panel password
+ * and replaying it into the login form, which is what the existing
+ * integrations had to do and exactly what this module exists to make
+ * unnecessary. Nothing here is specific to one caller: the API contract is
+ * the same for every consumer that holds a granted remote-API session.
  *
  * The clear token is returned ONCE, to the caller, and is never stored, logged
  * or re-derivable: the database holds only its SHA-256.
@@ -100,10 +103,11 @@ class remoting_connectsso extends remoting {
 		//* with client_login = 1 and remote_functions = ''
 		//* (remoting.inc.php:99-156). Trusting checkPerm() here would let any
 		//* API-enabled customer mint a panel login for any other non-admin
-		//* client: cross-tenant panel takeover. The billing system
-		//* authenticates as a REMOTE USER (client_login = 0), never as a
-		//* client, so client sessions are refused outright — with core's
-		//* verbatim wording, because WHY is nobody's business but the log's.
+		//* client: cross-tenant panel takeover. A legitimate consumer — a
+		//* billing system, a support tool, a script — authenticates as a
+		//* REMOTE USER (client_login = 0), never as a client, so client
+		//* sessions are refused outright, with core's verbatim wording,
+		//* because WHY is nobody's business but the log's.
 		//* Fail closed: only a session that PROVABLY carries client_login = 0
 		//* (the column is NOT NULL in remote_session) may proceed — a missing
 		//* key must refuse, not default to "remote user".
@@ -182,8 +186,9 @@ class remoting_connectsso extends remoting {
 		//* $type = 'user' for every client the API creates; limit_client > 0
 		//* only adds the `client` module, :311-313). A reseller is therefore
 		//* mintable, and their panel session administers their sub-clients.
-		//* That is deliberate — resellers are sold through billing systems too
-		//* — but it is documented in README §5 rather than left implied.
+		//* That is deliberate — resellers are sold and supported through the
+		//* same systems customers are — but it is documented in the README's
+		//* security model rather than left implied.
 		if ($user['typ'] === 'admin') {
 			$this->refuse(
 				$client_id,

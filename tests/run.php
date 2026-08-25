@@ -3,13 +3,14 @@
  * ispconfig-sso — standalone harness.
  * Copyright (c) 2026 Wade Beckett. GPLv3 — see ../LICENSE.
  *
- * The panel-side code cannot run under the connector's PHPUnit suite: it needs
+ * The panel-side code cannot run under an ordinary PHPUnit suite: it needs
  * ISPConfig's runtime ($app, its db class, the `remoting` base class). What it
  * CAN be checked against is a faithful stand-in for the two contracts it
  * depends on — core's remote.d auto-loader and core's $app/db surface — and
- * that is what this harness does. No dependencies, no database, no panel.
+ * that is what this harness does. No dependencies, no database, no panel, and
+ * nothing from any consuming project.
  *
- *   php companion/ispconfig-sso/tests/run.php
+ *   php tests/run.php
  *
  * It covers the token MINT half (the remote.d class) plus the shared helpers.
  * The REDEEM half (index.php) is a top-level script that redirects and exits,

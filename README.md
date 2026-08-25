@@ -1,11 +1,21 @@
-# ispconfig-sso — panel single sign-on for ISPConfig
+# ispconfig-sso — one-time panel login for ISPConfig
 
-An **optional** ISPConfig-side companion module. It adds one remote API function that mints a
-short-lived, single-use panel-login token, and one page that redeems it. With it installed, a
-billing system can offer a working *Log in to panel* button; without it, nothing breaks — the
-billing system simply shows the panel URL and username instead.
+A **single sign-on provider for ISPConfig 3.x**. It adds one remote API function that mints a
+short-lived, single-use panel-login token, and one page that redeems it and establishes the panel
+session.
 
-GPLv3. No ISPConfig core file is modified, read-only or otherwise.
+Anything that can call ISPConfig's remote API can use it: a billing system (WHMCS, Blesta,
+FOSSBilling, something bespoke), a support desk, a provisioning script, an internal dashboard. It
+has no opinion about who the caller is and no dependency on any of them — the whole interface is
+one remote function and one URL, documented in [§4, *Integrating your system*](#4-integrating-your-system).
+
+It exists because **ISPConfig core has no one-time-login API**, so every "Log in to panel" button
+ever shipped had to store the customer's panel password and replay it into the login form. This
+makes that unnecessary.
+
+GPLv3. **No ISPConfig core file is modified**, read-only or otherwise — it installs into
+`interface/web/connectsso/` through ISPConfig's own documented `remote.d` extension point and
+creates two tables of its own.
 
 > ### ⚠ The panel must be served over HTTPS
 >
@@ -30,21 +40,55 @@ GPLv3. No ISPConfig core file is modified, read-only or otherwise.
 
 ---
 
-## 1. Why this exists
+## 1. What it does, and what it does not
 
-ISPConfig core has **no one-time-login API**. Verified across the 3.3.1p1 tree:
+**It does:**
+
+- register **one** remote API function, `connect_sso_token_create`, which mints a 64-hex-character
+  token for one ISPConfig `client_id`, valid for **45 seconds**, redeemable **once**, and
+  optionally bound to a single source IP address;
+- serve **one** page, `/connectsso/`, which redeems that token and builds the same panel session
+  `interface/web/login/index.php` builds — same session keys, same start module, same theme gate —
+  then redirects to the panel's own `/index.php`;
+- store tokens **only as SHA-256**, and audit every mint, every refusal and every sign-in to both
+  `sys_log` and the panel's `auth.log`.
+
+**It does not:**
+
+- **Log anyone in as an administrator.** `sys_user.typ = 'admin'` is refused at mint *and* again at
+  redemption. There is no flag, no configuration setting and no parameter that relaxes this. If you
+  want an admin auto-login, this is the wrong project.
+- **Bypass two-factor authentication.** A token replaces the *password*. If the target user has
+  `otp_type != 'none'` the session is parked and the visitor is handed to the panel's own
+  `/login/otp.php`, exactly as the login form does. A forced password change is honoured the same
+  way.
+- **Store, read, set or replay panel passwords.** It never touches `sys_user.passwort`.
+- **Create anything.** The client and its panel user must already exist; this only mints a login for
+  one that does.
+- **Act as an identity provider.** No SAML, no OIDC, no OAuth, no cross-application session. The one
+  and only thing a token can do is open a session on *this* panel, for *one* named account.
+- **Add anything to the panel UI.** No navigation entry, no settings page, no dashlet. It ships no
+  `lib/module.conf.php`, which is what keeps it out of `nav.php`.
+- **Require a cron job.** Both tables garbage-collect themselves inline.
+- **Work over plain HTTP.** See the box above.
+- **Bound the session it creates.** Once redeemed, the result is an ordinary panel session with the
+  panel's own timeout — the 45 seconds is the hand-off window, not a session lifetime.
+
+## 2. Why it has to exist
+
+Verified across the ISPConfig 3.3.1p1 tree:
 
 - `client_login_get()` only *validates* a username/password pair.
 - `login($user, $pass, true)` mints a **remote API session** (a row in `remote_session`), not a
   panel session — the panel's own login is `$_SESSION['s']['user']`, written by
   `interface/web/login/index.php`.
 
-So every WHMCS/ISPConfig module that ever shipped a "log in to panel" button had to do it the only
-way core allowed: store the customer's panel password and replay it into a login form. That is why
-those modules leaked passwords into HTML, and it is the specific thing this module exists to make
-unnecessary.
+There is no third option in core. So every integration that ever offered a "log in to panel" button
+did it the only way core allowed: keep the customer's panel password somewhere and post it into the
+login form. That is why those integrations leaked passwords into HTML, and it is the specific thing
+this project exists to make unnecessary.
 
-## 2. How it attaches without touching core
+### How it attaches without touching core
 
 ISPConfig's remoting handler auto-loads extra remote API classes from modules
 (`interface/lib/classes/remoting_handler_base.inc.php:47`):
@@ -73,17 +117,18 @@ Two consequences of that mechanism, both deliberate here:
   therefore declares exactly **one** public method of its own, and `tests/run.php` asserts that it
   takes over nothing else.
 - Because the function is registered in the method map, `get_function_list` reports it. That is how
-  a client detects the companion: one call, and because that call returns the handler's **whole**
-  method map rather than the caller's own grants (`remoting.inc.php:685-692` returns `$this->_methods`),
-  "not installed" stays distinguishable from "installed but not granted".
-  `get_function_list` is **not** an ungated call — it is permission-checked like any other
-  (`checkPerm($session_id, 'get_function_list')`, `remoting.inc.php:687`). The grant lives in the
-  panel's **Server functions** checkbox (`interface/web/admin/lib/remote.conf.php:3`), which a
-  billing system already needs for `server_get`; only `login` and `logout` are ungated. A remote user
-  without it gets `permission_denied` from the probe, which a client must read as *SSO unavailable*,
-  not as *companion absent*.
+  a client detects that SSO is available on a panel — see [§4.2](#42-detecting-whether-a-panel-has-it).
 
-## 3. Install
+**Names are frozen.** The module directory (`connectsso`), the two table names
+(`connectsso_token`, `connectsso_attempt`), the remote function name
+(`connect_sso_token_create`) and its three parameter names are all installed state on live panels:
+the directory *is* the registration mechanism, the function name is the literal string stored in
+`remote_user.remote_functions` on every panel that has granted it, and the JSON API maps request
+keys to parameter names by reflection. Renaming any of them silently breaks working installs and
+grants, so they will not change. Only display strings — the grant checkbox label, this document —
+are free to be reworded.
+
+## 3. Install and remove
 
 ```sh
 ./install.sh                       # /usr/local/ispconfig
@@ -106,11 +151,8 @@ It does **not** put anything in the panel navigation: `nav.php` renders only mod
 
 **Then grant it**, which the installer will not do for you:
 System → Remote Users → your API user → Functions →
-tick *ISPConfig Connect: panel single sign-on (SSO token)* → Save.
+tick *Panel single sign-on (one-time login token)* → Save.
 (If the box is missing, log out and back in — the list is built from the logged-in admin's modules.)
-
-The same user also needs **Server functions**, because that is the checkbox carrying
-`get_function_list` — how a client discovers that this module is installed at all.
 
 **And confirm the panel is HTTPS.** Both halves refuse on a plaintext request; see the box at the
 top of this file, including what to set when a reverse proxy terminates TLS for you.
@@ -121,6 +163,12 @@ Uninstall reverses all three steps:
 ./uninstall.sh              # also drops the tables (they hold nothing but live tokens)
 ./uninstall.sh --keep-data
 ```
+
+Removing `interface/web/connectsso/` is what unregisters the function — from the very next remote
+API request, `connect_sso_token_create` is simply not in the method map any more. Nothing of
+ISPConfig's own was changed, so there is nothing to restore. The uninstaller deliberately does *not*
+rewrite anyone's `remote_user.remote_functions`: a grant for a function that no longer exists is
+inert, and rewriting other people's permission rows is not an uninstaller's job.
 
 ### Known caveat
 
@@ -135,23 +183,61 @@ php bin/connectsso_module.php --assign /usr/local/ispconfig/interface/lib/config
 
 Token minting and redemption are unaffected by this; only the checkbox is.
 
-## 4. The API
+## 4. Integrating your system
+
+This is the part that makes the project worth shipping separately. Everything below is the complete
+contract — there is nothing else to learn, and no library to depend on.
+
+> ### ⚠ You own the authorisation decision. Read this before you write any code.
+>
+> **A token proves nothing about who asked for it.**
+>
+> `connect_sso_token_create` mints a login for whatever `client_id` you pass it. It cannot know
+> whether the person clicking the button in your system actually owns that client account. It checks
+> that **you** are allowed to mint tokens; it does not, and cannot, check that **they** are allowed
+> to receive this one. That check is yours, it is not optional, and skipping it is the one way to
+> turn this project into a vulnerability.
+>
+> The failure mode is not subtle. A customer opens `/panel-login?client_id=57`, your code passes 57
+> through to the mint call, and they are signed in to somebody else's hosting account with full
+> control of its websites, mailboxes, databases and DNS. The panel has no way to notice: as far as it
+> is concerned, a trusted integration asked for a token and got one.
+>
+> So, in your own code, on every single mint:
+>
+> 1. Identify the visitor from **your own session**, never from a request parameter.
+> 2. Look up the ISPConfig `client_id` **from your own records**, for that authenticated identity —
+>    the service or account row where you already store the panel client id.
+> 3. Confirm they are entitled to that specific service *right now*: it is theirs, and it is active.
+> 4. Only then mint, and redirect immediately.
+>
+> Never take a client id, a panel username or a panel base URL from a query string, a form field, a
+> cookie or a JavaScript call. If your SSO entry point accepts an identifier as input, that
+> identifier is an authorisation bypass waiting to be found.
+>
+> The same reasoning applies to *staff* SSO: an admin in your billing system opening a customer's
+> panel is fine, but it is your permission model that decides which staff may do it, and your audit
+> log that should record that they did. The panel only records that your integration minted a token.
+
+### 4.1 The contract
+
+**Function**
 
 ```
 connect_sso_token_create(session_id, client_id, bind_ip = '')
 ```
 
-| Parameter   | Meaning |
-|---|---|
-| `session_id` | ordinary remote API session from `login()` |
-| `client_id`  | `client.client_id` to log in as |
-| `bind_ip`    | optional. The address the token may be redeemed **from** — the *end user's browser*, not the API caller's. `''` leaves it unbound. |
+| Parameter | Type | Meaning |
+|---|---|---|
+| `session_id` | string | An ordinary ISPConfig remote API session, from `login()`. Must be a **remote user's** session, not a client login (see below). |
+| `client_id` | int | The `client.client_id` to log in as. Must be > 0. |
+| `bind_ip` | string | Optional. The address the token may be redeemed **from** — the *end user's browser*, not your server's. `''` leaves it unbound. |
 
-Returns:
+**Returns** (a JSON object / associative array):
 
 ```json
 {
-  "token": "<64 lowercase hex chars>",
+  "token": "9f2c…64 lowercase hex chars…a1",
   "path": "/connectsso/",
   "expires_in": 45,
   "client_id": 12,
@@ -159,12 +245,198 @@ Returns:
 }
 ```
 
-The caller redirects the browser to `<panel base URL>` + `path` + `?token=` + `token`.
-`path` is reported rather than assumed so the endpoint can move without a client release.
+| Field | Use it for |
+|---|---|
+| `token` | The credential. Exactly 64 lowercase hex characters today; treat it as opaque and validate it against a conservative charset before putting it in a URL. |
+| `path` | Where to send the browser, relative to the panel's base URL. **Reported rather than assumed**, so the endpoint can move without a client release. Validate it as a plain local path (see the example) — that check is your open-redirect guard. |
+| `expires_in` | Seconds of validity, currently 45. Useful for a "this link has expired" message; the panel is the authority, not your clock. |
+| `client_id` | Echo of what you asked for, as an int. |
+| `username` | The panel username the token logs in as. Display-only — handy for "You will be signed in as *acmeltd*". |
 
-Faults (all flattened to `remote_fault` by the JSON handler, message preserved). Every one of them
-is written to `sys_log` and `auth.log` first, with the real reason; the caller only ever sees the
-message in this table:
+**Semantics you must build around**
+
+1. **Single use.** The first redemption burns it; the second is refused. Never hand the same token
+   to two things.
+2. **45 seconds.** Mint it *at click time*, in the request that redirects. Do not mint on page
+   render, do not put one in an email, do not cache one, do not queue one.
+3. **One live token per client.** Minting deletes that client's previous unredeemed token. Two
+   "Log in" clicks in quick succession means the first link stops working.
+4. **The browser redeems it, not you.** Your server never fetches `path`; it only redirects the
+   customer's browser there.
+5. **The panel's public base URL may differ from your API URL.** ISPConfig's API commonly lives on
+   `:8080` while customers reach the panel by another hostname or port. Make the base URL of the
+   redirect configurable rather than derived from your API endpoint.
+
+**Transport.** It is an ordinary ISPConfig remote function, so:
+
+- **`remote/json.php` — recommended.** The method name is the first query-string key; parameters go
+  in the JSON request body **keyed by parameter name** (`interface/lib/classes/json_handler.inc.php`
+  maps them by reflection). A missing key is passed as `null`.
+- **`remote/index.php` — SOAP.** Works too, with positional arguments, via any ISPConfig SOAP client.
+- **`remote/api/v1/…` — REST. Cannot reach this function.** That handler builds the method name from
+  the HTTP verb (`_add`, `_get`, `_update`, `_delete`), and nothing it can build ends in `_create`.
+
+**Prerequisites on the panel side**
+
+| Requirement | Where |
+|---|---|
+| This project installed | `./install.sh` |
+| `connect_sso_token_create` granted to your API user | System → Remote Users → Functions |
+| *Server functions* granted, **only if** you want to probe with `get_function_list` | same form; that checkbox is the one carrying `get_function_list` (`interface/web/admin/lib/remote.conf.php:3`) |
+| Remote API enabled | `remote_api_allowed = yes` in `security_settings.ini`; otherwise **both** `json.php` and `index.php` refuse every call with a plain-text `Remote API is disabled in security settings.` |
+| Your caller's address in the user's Remote Access IP list | System → Remote Users → Remote Access IPs (or leave it empty to allow any address) |
+| Panel served over HTTPS | see the box at the top |
+
+### 4.2 Detecting whether a panel has it
+
+Call `get_function_list` and look for `connect_sso_token_create` in the result. That call returns
+the handler's **whole** method map rather than the caller's own grants
+(`remoting.inc.php:685-692` returns `$this->_methods`), so it is a true presence probe.
+
+It is **not** an ungated call — it is permission-checked like any other
+(`checkPerm($session_id, 'get_function_list')`, `remoting.inc.php:687`), and the grant lives in the
+**Server functions** checkbox. Only `login` and `logout` are ungated. So there are three outcomes,
+and a good client tells them apart:
+
+| Result | Means |
+|---|---|
+| the name is in the list | SSO is installed. It may still not be granted *to you* — you find that out by calling it. |
+| the name is absent | SSO is not installed on this panel. Hide the button; this is not an error. |
+| the probe itself is refused as a permission failure | You lack *Server functions*. Report it as **SSO unavailable**, never as "SSO is not installed" — you genuinely do not know. Over SOAP this arrives as `permission_denied`; over JSON the code is flattened to `remote_fault` and you match on the message (see [§4.5](#45-faults)). |
+
+Calling `connect_sso_token_create` on a panel without it installed returns ISPConfig's own
+`invalid_method` (`Method connect_sso_token_create does not exist`), which is equally usable as a
+probe if you would rather skip the extra round trip.
+
+### 4.3 Worked example — plain PHP, no dependencies
+
+Copy this into any system. It logs in, mints, and redirects; there is nothing else to it.
+
+```php
+<?php
+/**
+ * Minimal ISPConfig single sign-on consumer.
+ * Run this from the request that handles the customer's "Log in to panel" click.
+ */
+
+$apiUrl    = 'https://panel.example.com:8080/remote/json.php'; // the remote API
+$panelBase = 'https://panel.example.com:8080';                 // what the BROWSER can reach
+$apiUser   = 'billing';
+$apiPass   = getenv('ISPCONFIG_API_PASSWORD');
+// The panel-side client.client_id. In real code this MUST come from your own
+// database, looked up for the already-authenticated visitor — never from the
+// request. See the warning at the top of section 4: that lookup is the entire
+// security boundary on your side of this call.
+$clientId  = lookup_client_id_for_logged_in_user();
+$bindIp    = '';                        // or the END USER's address; '' = unbound
+
+/**
+ * One ISPConfig JSON API call. The method name is the first query-string key;
+ * parameters are a JSON body keyed by the function's own parameter names.
+ */
+function ispconfig_call($apiUrl, $method, array $params) {
+    $ch = curl_init($apiUrl . '?' . $method);
+    curl_setopt_array($ch, array(
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($params),
+        CURLOPT_HTTPHEADER     => array('Content-Type: application/json'),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 15,
+        // The panel is about to hand back a password substitute. Verify that it
+        // really is your panel: never turn these off in production.
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+    ));
+    $body = curl_exec($ch);
+    if ($body === false) {
+        $err = curl_error($ch);
+        curl_close($ch);
+        throw new RuntimeException('ISPConfig unreachable: ' . $err);
+    }
+    curl_close($ch);
+
+    $decoded = json_decode($body, true);
+    if (!is_array($decoded) || !isset($decoded['code'])) {
+        throw new RuntimeException('ISPConfig returned a non-API response');
+    }
+    if ($decoded['code'] !== 'ok') {
+        // 'remote_fault' carries this project's messages; 'invalid_method'
+        // means the panel does not have it installed.
+        throw new RuntimeException($decoded['code'] . ': ' . $decoded['message']);
+    }
+
+    return $decoded['response'];
+}
+
+$sessionId = ispconfig_call($apiUrl, 'login', array(
+    'username' => $apiUser,
+    'password' => $apiPass,
+));
+
+$ticket = ispconfig_call($apiUrl, 'connect_sso_token_create', array(
+    'session_id' => $sessionId,
+    'client_id'  => $clientId,
+    'bind_ip'    => $bindIp,
+));
+
+ispconfig_call($apiUrl, 'logout', array('session_id' => $sessionId));
+
+// Validate what came back before it goes anywhere near a URL. Note the /D on
+// both patterns: without it PCRE's '$' also matches BEFORE a final newline, so
+// a value ending in a raw LF would pass and then land in a Location: header.
+if (!isset($ticket['token']) || !preg_match('/^[a-f0-9]{32,256}$/D', $ticket['token'])) {
+    throw new RuntimeException('no usable one-time token was returned');
+}
+$path = isset($ticket['path']) && $ticket['path'] !== '' ? $ticket['path'] : '/connectsso/';
+// A single leading slash and safe path characters only. THIS is the open-redirect
+// guard: it rejects '//evil.example/', 'https://evil.example/', 'connectsso/'
+// (relative), anything carrying '?' or '#', and '../'.
+if (!preg_match('#^/(?!/)[A-Za-z0-9._~/-]*$#D', $path) || strpos($path, '..') !== false) {
+    throw new RuntimeException('the panel reported an unusable endpoint path');
+}
+
+header('Location: ' . $panelBase . $path . '?token=' . rawurlencode($ticket['token']));
+exit;
+```
+
+Two refinements worth making in a real integration:
+
+- **Reuse the API session.** `login()` writes a row to `remote_session` and is rate-limited by core
+  (10 failures per 5 minutes, `remoting.inc.php:94`). A long-lived integration should cache the
+  session id and re-login only when a call fails as expired, rather than logging in per click.
+- **Prefer POST for the hand-off** if you can render an interstitial page. The endpoint accepts the
+  token as a **POST** parameter as well as a query-string one, so an auto-submitting form keeps the
+  token out of the panel's access log and the customer's browser history:
+
+  ```html
+  <form id="sso" method="post" action="https://panel.example.com:8080/connectsso/">
+    <input type="hidden" name="token" value="…">
+  </form>
+  <script>document.getElementById('sso').submit();</script>
+  ```
+
+  The trade-off is that the token now passes through your own page's HTML instead. Pick whichever
+  log you would rather it landed in; a redirect is the simpler default and is what the 45-second
+  lifetime is sized for.
+
+### 4.4 About `bind_ip`
+
+Pass the **end user's** address as your system sees it — the browser redeems the token, your server
+only mints it. The comparison is on the binary form (`inet_pton` + `hash_equals`), so equivalent
+spellings of the same address match and nothing else does.
+
+Bind only when the panel and your system will genuinely see the same address. A CDN or reverse proxy
+in front of either, or an IPv4/IPv6 asymmetry, and **every** login fails. Unbound is the safe
+default; bound is stronger where the topology allows it. Note also that the panel reads
+`REMOTE_ADDR` only — never `X-Forwarded-For` — so behind a proxy you must make the proxy set
+`REMOTE_ADDR` (`mod_remoteip`, nginx `realip`) or leave binding off.
+
+### 4.5 Faults
+
+Everything below arrives as a `SoapFault`, flattened by the JSON handler to
+`{"code":"remote_fault","message":"…"}` with the message preserved. Every one of them is written to
+`sys_log` and `auth.log` **first**, with the real internal reason; the caller only ever sees the
+message in this table.
 
 | Message | Cause |
 |---|---|
@@ -176,6 +448,24 @@ message in this table:
 | `Single sign-on is not available for administrator accounts.` | target is an admin |
 | `The panel user for this client is not active.` | `sys_user.active != 1` |
 | `The client account is locked; single sign-on is refused.` | `client.locked = 'y'` or `client.canceled = 'y'` |
+
+Not from this project, but you will meet them on the same call:
+
+- `invalid_method` — a **JSON-handler** code, meaning the panel does not have this project installed.
+  Together with `invalid_data` it is one of the few codes that is genuinely its own; treat it as the
+  cheap "not installed" signal.
+- core's own `login_failure_limit` and `maintenance_mode` faults from `login()`. Over SOAP those
+  arrive as their own fault codes; **over JSON they flatten to `remote_fault` like everything else**,
+  so match on the message, not the code. That flattening is why a JSON client cannot branch on
+  `permission_denied` either — see the third row of the table in [§4.2](#42-detecting-whether-a-panel-has-it).
+- a plain-text `Remote API is disabled in security settings.` — not JSON at all, because
+  `remote/json.php` `die()`s before the handler runs when `remote_api_allowed` is not `yes`. A client
+  that assumes every response is JSON will fail to parse this one; say so in your error message
+  rather than reporting "invalid response".
+
+Refusals the **visitor** meets at the redemption endpoint are deliberately uniform: every
+token-related failure renders the same 403 page. Your side never learns which one it was, by design
+— see [§5](#5-security-model).
 
 ## 5. Security model
 
@@ -222,7 +512,7 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   client and the panel user; it never writes the token or its hash.
 
 **Lifetime and use count**
-- **45 seconds** (`CONNECTSSO_TOKEN_TTL`, hard limit 60). It covers one HTTP redirect, nothing more.
+- **45 seconds** (`CONNECTSSO_TOKEN_TTL`; the test suite fails the build if it is set above 60). It covers one HTTP redirect, nothing more.
 - **Single use.** The guard is a conditional `UPDATE … WHERE used_at IS NULL` whose affected-row
   count decides the winner — atomic in the database, so two simultaneous redemptions cannot both
   succeed. The `used_at` check before it is a fast path, not the lock. The endpoint also verifies
@@ -239,15 +529,10 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
 
 **Binding**
 - Always bound to one `client_id`/`sys_userid`.
-- Optionally bound to a source IP. Pass the end user's address as your billing system sees it. The
-  comparison is on the binary form (`inet_pton` + `hash_equals`), so equivalent spellings of the
-  same address match and nothing else does.
+- Optionally bound to a source IP — see [§4.4](#44-about-bind_ip) for when that is a good idea.
 - Binding is checked **before** the token is burned, on purpose: someone who scraped a token from a
   log should not be able to invalidate the real customer's link just by opening it from the wrong
   address.
-- Do **not** bind when the panel and the billing system disagree about the customer's address —
-  a CDN or reverse proxy in front of either, or an IPv4/IPv6 asymmetry, and every login fails.
-  Unbound is the safe default; bound is stronger where the topology allows it.
 
 **Redemption endpoint**
 - **TLS first.** A request that did not arrive over TLS is refused before the token is looked at,
@@ -288,8 +573,8 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   is mandatory, because a token-based login with an attacker-chosen session id is worse than no SSO
   at all.
 - **Open redirect:** the destination is a fixed `/index.php`. The request cannot influence where it
-  lands. The WHMCS-side client independently refuses any endpoint path from the panel that is not a
-  plain local path, so neither half will build an off-site redirect.
+  lands. The other half of that guard belongs to the client: validate the `path` the panel reports
+  before building a redirect from it, as [§4.3](#43-worked-example--plain-php-no-dependencies) does.
 - **Two-factor authentication is preserved.** If the target user has `otp_type != 'none'`, the
   session is parked in `$_SESSION['s_pending']` and the visitor is handed to the panel's own
   `/login/otp.php`, exactly as `login/index.php` does. An SSO link replaces the password, not the
@@ -315,6 +600,12 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   `X-Robots-Tag: noindex` on every response.
 
 **What is deliberately NOT claimed**
+- **The calling system's authorisation is not checked, and cannot be.** This module verifies the
+  *caller* — a granted remote user, over TLS — not the *visitor*. Nothing on the panel side can tell
+  whether the person who clicked owns the `client_id` that was passed. An integration that takes a
+  client id from a request parameter is exploitable, it will look completely normal in every log
+  here, and no setting in this project can protect against it. See the warning at the top of
+  [§4](#4-integrating-your-system); it is the most important paragraph in this document.
 - **The token appears in the panel's access log.** A browser redirect is a GET, so the token is in
   the URL. That is inherent to the pattern (cPanel and Plesk one-time-login URLs have the same
   property) and is why the token is single-use, expires in under a minute, and is stored hashed.
@@ -324,8 +615,9 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   refuses the case that is unambiguously wrong (a plaintext request to the panel itself). It cannot
   see the hop between a browser and a reverse proxy, or between the proxy and the panel; where the
   operator declared `reverse_proxy_panel_allowed`, both of those are the operator's to get right. It
-  also says nothing about the *billing system's* side of the call — that end must verify the panel's
-  certificate itself, which is the connector's `Access Hash` / `insecure:` setting.
+  also says nothing about the *calling system's* side of the connection — that end must verify the
+  panel's certificate itself (`CURLOPT_SSL_VERIFYPEER` in the example above, or whatever your client
+  library calls it).
 - **`REMOTE_ADDR` only.** `X-Forwarded-For` and friends are client-supplied and are never consulted.
   Behind a reverse proxy, make the proxy set `REMOTE_ADDR` (`mod_remoteip`, nginx `realip`), or
   leave IP binding off; otherwise the rate limiter buckets every visitor together and binding
@@ -336,7 +628,7 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   redirect-based flow.
 - **A leaked API grant is a leaked panel.** A remote user holding `connect_sso_token_create` can
   mint a login for **every non-administrator account on the panel, resellers included** — see
-  *Who may be minted FOR* above. Grant it only to the API user your billing system uses, and keep
+  *Who may be minted FOR* above. Grant it only to the API user your integration uses, and keep
   that user's Remote Access IP list populated. Note what that list actually is: ISPConfig resolves
   any hostname in it with `dns_get_record()` **on every login**
   (`remoting.inc.php:173-189`), with no caching and no failure handling — a hostname entry makes your
@@ -354,6 +646,18 @@ Two tables, both module-owned, neither referenced by anything in ISPConfig:
 
 Neither survives uninstall by default, and losing them costs nothing: everything in them expires
 within a minute (tokens) or five (rate-limit buckets).
+
+It writes to exactly two things of ISPConfig's own, and both are worth naming precisely:
+
+- **`sys_user.modules`** — the install/uninstall scripts add or remove the string `connectsso` on
+  `typ = 'admin'` rows, which is what makes the grant checkbox render. Nothing at runtime touches it.
+- **`sys_log`**, through core's own `$app->log()`, plus the panel's `auth.log` file through
+  `$app->auth_log()` — the audit trail described below. These are appends to ISPConfig's logging,
+  made through ISPConfig's own API, exactly as a core remote function's own log lines are.
+
+Those two are the whole of it. Beyond them and the module's own two tables, nothing in this project
+writes ISPConfig-owned state: no schema change to an existing table, no new column, no row in
+`sys_datalog`.
 
 Audit lines go to `sys_log` (Monitor → System Log) for every mint, every refusal in **either** half —
 including a call from a remote user that does not hold the grant — and every successful sign-in.
@@ -395,12 +699,14 @@ The PHP under `interface/` is written in ISPConfig's own PHP-5-compatible style 
 php tests/run.php
 ```
 
-A standalone harness — no panel, no database, no test framework. It replays core's remote.d
-auto-loader against this module (so a rename or an accidental second public method fails loudly),
-and drives the mint function through every refusal path and the happy path against a stand-in for
-`$app`, asserting among other things that:
+A standalone harness — no panel, no database, no test framework, no dependency on any consuming
+project. It replays core's remote.d auto-loader against this module (so a rename or an accidental
+second public method fails loudly), and drives the mint function through every refusal path and the
+happy path against a stand-in for `$app`, asserting among other things that:
 
 - the clear token appears in **no** stored column and in **no** log line;
+- the wire parameter names are still `session_id`, `client_id`, `bind_ip` — the JSON API maps
+  request keys to parameter names by reflection, so renaming one would break every client;
 - the TLS gate refuses plaintext and steps aside only for a declared reverse proxy;
 - **every** refusal writes an audit line to both `sys_log` and `auth.log` and mints nothing — that
   one is table-driven, so a refusal added to the function without being added to the table fails the
@@ -408,8 +714,8 @@ and drives the mint function through every refusal path and the happy path again
 - every SQL statement in the module survives core's `securityScan()`.
 
 What it cannot cover is the redemption endpoint, which is a top-level script that redirects and
-exits. That half is verified by hand on a real panel; the harness prints the checklist when it
-finishes (replay, expiry, IP binding, rate limit, TLS gate, 2FA hand-off, session-id rotation, and
+exits. That half is verified by hand on a real panel; the harness prints the 18-item checklist when
+it finishes (replay, expiry, IP binding, rate limit, TLS gate, 2FA hand-off, session-id rotation, and
 the install/uninstall round trip).
 
 ## 9. Compatibility
@@ -422,3 +728,20 @@ than installing something that would silently never register. Everything the mod
 `sys_user`, `client.locked` / `client.canceled`, the session keys written by `login/index.php`, the
 OTP hand-off — is long-standing, but nothing here is upstream API: **re-verify after a major
 ISPConfig upgrade**, and treat this README's line-number citations as version-specific.
+
+## 10. Known integrations
+
+Systems known to speak this contract:
+
+| Integration | What it is |
+|---|---|
+| [ISPConfig Connect for WHMCS](https://github.com/wadejbeckett/ispconfig-connect-whmcs) | WHMCS provisioning module. Detects this project at runtime with one `get_function_list` call and shows its SSO buttons only when it is installed *and* granted; falls back to displaying the panel URL and username otherwise. |
+
+Nothing on that list is required, and nothing about it is privileged — it is a list of consumers, not
+of dependencies. **Built something?** Open a pull request adding a row: name, one sentence, link. A
+row needs no approval beyond being real and working.
+
+## Licence
+
+GPLv3 — see [LICENSE](LICENSE). Security reports go to security@noiz.co.za; see
+[SECURITY.md](SECURITY.md). Contributions welcome: [CONTRIBUTING.md](CONTRIBUTING.md).

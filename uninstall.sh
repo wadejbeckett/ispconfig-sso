@@ -101,5 +101,8 @@ else
 fi
 
 say
-say "Done. Single sign-on is no longer available on this panel; billing systems"
-say "that probe for it will simply stop offering the button."
+say "Done. Single sign-on is no longer available on this panel."
+say "'connect_sso_token_create' is gone from the next remote API request onward,"
+say "so a client that probes with get_function_list stops offering the button;"
+say "one that calls it anyway gets ISPConfig's own method-does-not-exist error"
+say "('invalid_method' over remote/json.php)."

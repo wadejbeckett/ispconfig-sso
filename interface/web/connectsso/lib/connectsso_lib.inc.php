@@ -1,7 +1,7 @@
 <?php
 
 /*
- * ispconfig-sso — panel single sign-on for ISPConfig (companion module).
+ * ispconfig-sso — one-time panel login tokens for ISPConfig.
  * Copyright (c) 2026 Wade Beckett.
  *
  * This program is free software: you can redistribute it and/or modify it
