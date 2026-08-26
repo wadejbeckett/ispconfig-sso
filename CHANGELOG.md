@@ -41,10 +41,36 @@ The date lands when the first tag does.
 - `install.sh` / `uninstall.sh` — deploy or remove the module directory, create or drop the two
   tables, and add or remove `connectsso` in each admin's `sys_user.modules` (which is what makes the
   grant checkbox render). `--symlink`, `--no-assign`, `--no-schema`, `--keep-data`.
+- **`./install.sh --status [ISPCONFIG_ROOT]`** — a read-only checklist for when single sign-on is
+  not working and it is 2am. One `PASS` / `FAIL` / `INFO` line each for: the module directory and
+  whether it still matches this checkout; the installed version; core's `remote.d` extension point;
+  the two tables; whether `connectsso` is in *every* admin's module list (a partial one is a
+  hazard — an admin without it who saves System → Remote Users silently drops the grant); which
+  remote users hold `connect_sso_token_create`, flagging any whose `remote_access` is `n`; whether
+  `remote_api_allowed` is on at all; whether a reverse proxy is declared; and the token lifetime and
+  rate limits **actually in force**. Every `FAIL` prints the exact command that fixes it. It changes
+  nothing — no file, no table, no row — and exits non-zero if anything essential is wrong, so it can
+  be run from monitoring.
+- **Optional configuration override — `<ISPCONFIG_ROOT>/interface/lib/connectsso.ini`.** Previously
+  every tunable was a `define()` in a shipped file, so changing one meant editing the module and
+  losing the edit on the next `./install.sh`. Four settings can now live outside the module:
+  `token_ttl`, `attempt_limit`, `attempt_window` and `allow_unbound_tokens`. `conf/connectsso.ini.example`
+  documents all four and is the file you copy into place. The location is deliberate: it is above
+  the panel's document root (`interface/web`) so it is not web-servable, the installer never writes
+  it and the uninstaller never deletes it, and an ISPConfig upgrade merges `interface/` rather than
+  replacing it (`install/lib/installer_base.lib.php:3599`) so it survives one. Notably it is **not**
+  `security_settings.ini`, which the ISPConfig installer rewrites from a master template on every
+  upgrade (`:3613-3618`) — the exact loss this file exists to prevent.
+- `allow_unbound_tokens = no` — a panel where the operator knows the panel and the calling system
+  see the same client address can make IP binding mandatory. A mint with an empty `bind_ip` is then
+  refused with `This panel requires single sign-on tokens to be bound to an IP address.`, audited
+  like every other refusal. Default is `yes`: binding fails outright behind a CDN or a proxy that
+  does not set `REMOTE_ADDR`.
 - `bin/connectsso_schema.php` (`--install` / `--drop` / `--check`) and `bin/connectsso_module.php`
-  (`--assign` / `--unassign`) — the same steps as standalone, idempotent CLI tools.
+  (`--assign` / `--unassign` / `--status`) — the same steps as standalone, idempotent CLI tools.
+  `--status` is read-only and reports the admin module list and the current grant holders.
 - `tests/run.php` — a dependency-free harness that replays core's `remote.d` auto-loader against the
-  module and drives the mint function through every refusal path and the happy path. 93 checks. It
+  module and drives the mint function through every refusal path and the happy path. 152 checks. It
   also prints the 18-item manual checklist for the redemption half, which cannot be covered without
   a real panel.
 - README integration guide: the full API contract, detection via `get_function_list`, a worked
@@ -79,3 +105,13 @@ Everything in this list is a deliberate property of 1.0.0, not a fix for a prior
 - **Uniform refusals:** every token-related failure renders the identical 403 page, so the endpoint
   is never an oracle about someone else's token.
 - **Direct-request guards** on every `.php` under `lib/`, which the stock vhosts do not deny.
+- **The override file cannot weaken anything.** It accepts four settings and nothing else. Every
+  numeric value is clamped to a documented range (`token_ttl` 5–60, `attempt_limit` 1–1000,
+  `attempt_window` 60–86400) rather than obeyed — `attempt_limit = 0` becomes 1 instead of locking
+  every visitor out forever. A key naming a security-critical control (`token_bytes`,
+  `token_entropy`, `token_hash`, `hash_algo`, `single_use`, `allow_reuse`, `allow_admin`,
+  `require_tls`, `allow_http`) is refused **by name, with the reason**, so nobody is left believing
+  they turned one off; an unrecognised key is reported as such, so a typo never looks like it
+  worked. A file that cannot be read or parsed leaves every shipped default in force and complains
+  loudly — to the PHP error log, to `sys_log` on both request paths, and as a `FAIL` line in
+  `./install.sh --status`.

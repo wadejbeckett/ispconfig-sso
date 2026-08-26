@@ -12,6 +12,12 @@
 #
 # Nothing of ISPConfig's own is touched, so there is nothing to restore.
 #
+# IT DOES NOT DELETE YOUR OWN CONFIGURATION. If you created the optional
+# override file — <ISPCONFIG_ROOT>/interface/lib/connectsso.ini — it is left
+# exactly where it is and its path is printed at the end. An operator's own
+# settings are not an uninstaller's to destroy, and the file is inert once the
+# module is gone: nothing reads it. Delete it yourself if you want it gone.
+#
 # Dropping the tables loses nothing: connectsso_token holds only unredeemed or
 # just-redeemed one-time tokens, every one of which expires within a minute, and
 # connectsso_attempt holds a five-minute rate-limit window. --keep-data is there
@@ -52,6 +58,8 @@ ISPCONFIG_ROOT="${ISPCONFIG_ROOT:-/usr/local/ispconfig}"
 WEB_DIR="$ISPCONFIG_ROOT/interface/web"
 CONF="$ISPCONFIG_ROOT/interface/lib/config.inc.php"
 DEST="$WEB_DIR/connectsso"
+# The operator's own settings, if they made any. Reported below, NEVER removed.
+OVERRIDE="$ISPCONFIG_ROOT/interface/lib/connectsso.ini"
 
 [ -d "$WEB_DIR" ] || {
   echo "ERROR: $WEB_DIR not found — is ISPCONFIG_ROOT correct?" >&2
@@ -98,6 +106,21 @@ if [ "$DROP_DATA" -eq 1 ]; then
   fi
 else
   say "  database: tables kept (--keep-data)"
+fi
+
+# 4. the operator's own configuration ---------------------------------------
+# Reported, never removed. This file is not ours: the installer did not write
+# it, so the uninstaller does not get to delete it. It is inert now — nothing
+# reads it once interface/web/connectsso is gone — and it is exactly what you
+# want still sitting there if this uninstall is really the first half of a
+# reinstall.
+if [ -e "$OVERRIDE" ]; then
+  say "  configuration: KEPT (not ours to delete)"
+  say "                 $OVERRIDE"
+  say "                 Nothing reads it now. Re-installing picks it up again;"
+  say "                 delete it by hand if you want it gone."
+else
+  say "  configuration: no override file was present"
 fi
 
 say

@@ -17,8 +17,11 @@
  * This file is include_once'd from the remote.d class, which ISPConfig loads on
  * EVERY remote API request (remoting_handler_base.inc.php globs
  * interface/web/*&#47;lib/classes/remote.d/*.inc.php). It must therefore stay
- * small and free of side effects: constants and functions only, no queries, no
- * output.
+ * small and cheap: constants and functions only, no queries, no output.
+ *
+ * The ONE side effect it does have is the optional override file — a single
+ * stat() when it is absent (the normal case) and one parse_ini_file() when it
+ * is present. See the OVERRIDE FILE block below for where it lives and why.
  *
  * ISPConfig 3.x runs on a wide PHP range and its own code is PHP 5-flavoured;
  * this file matches that style deliberately (no strict_types, no namespaces,
@@ -42,6 +45,390 @@ if (!defined('ISPC_ROOT_PATH') && PHP_SAPI !== 'cli' && PHP_SAPI !== 'phpdbg') {
 	die();
 }
 
+/* ---------------------------------------------------------------------------
+ * OVERRIDE FILE
+ *
+ * Everything below that an operator may reasonably want to tune used to be a
+ * define() in this shipped file, which meant editing it — and losing the edit
+ * on the next ./install.sh. These functions read an OPTIONAL ini file instead,
+ * validate it, clamp it, and leave the shipped defaults in force when it is
+ * absent, unreadable or broken.
+ *
+ * WHERE IT LIVES, and why:  <ispconfig>/interface/lib/connectsso.ini
+ *
+ *   - NOT WEB-SERVABLE. ISPConfig's panel vhost roots at
+ *     <ispconfig>/interface/web/ — install/tpl/apache_ispconfig.vhost.master:53
+ *     (DocumentRoot) and install/tpl/nginx_ispconfig.vhost.master:16 (root).
+ *     interface/lib/ is the directory ABOVE that root, holding the panel's own
+ *     config.inc.php, and no request can reach it. Anything under
+ *     interface/web/connectsso/ could be, which is why the module's own .php
+ *     files each carry a direct-request guard — a plain ini could carry none.
+ *   - SURVIVES AN ADD-ON UPDATE. ./install.sh only ever writes and removes
+ *     interface/web/connectsso; it never touches this path, and ./uninstall.sh
+ *     reports the file rather than deleting it.
+ *   - SURVIVES AN ISPCONFIG UPGRADE. ispconfig_update.sh runs install/update.php,
+ *     which calls the SAME install_ispconfig() a first install does
+ *     (update.php:643). That deploys the interface with
+ *     `cp -rf ../interface <install_dir>`
+ *     (install/lib/installer_base.lib.php:3599) — a MERGE, not a replace, which
+ *     is the same reason the module directory itself survives — and then
+ *     re-runs `chown -R ispconfig:ispconfig <install_dir>/interface` (:3774),
+ *     so the panel can still read this file afterwards.
+ *   - NOT security_settings.ini. That would have been the obvious home, but the
+ *     installer REWRITES it from a master template on every install and upgrade
+ *     (installer_base.lib.php:3613-3618, keeping only a `~` backup), so a
+ *     setting placed there is exactly the thing this file exists to prevent:
+ *     an operator's configuration silently lost on update.
+ *
+ * WHAT MAY BE CHANGED is deliberately a short list — token lifetime, the two
+ * rate-limit numbers, and whether a token may be minted unbound. The controls
+ * that make a leaked token worth little (256-bit entropy, SHA-256 at rest,
+ * single use, and the refusal to ever mint for an administrator) and the TLS
+ * gate are NOT overridable: a key naming one of them is refused by name, with a
+ * reason, rather than quietly ignored. connectsso.ini.example says the same
+ * thing in the file the operator is actually looking at.
+ * ------------------------------------------------------------------------- */
+if (!function_exists('connectsso_config_defaults')) {
+
+	/**
+	 * Basename of the override file. Only ever joined to a directory that is
+	 * above the panel's document root — see the block comment above.
+	 */
+	define('CONNECTSSO_CONFIG_NAME', 'connectsso.ini');
+
+	/**
+	 * The shipped value of every tunable. These are the numbers the README
+	 * documents and the ones in force when there is no override file.
+	 *
+	 * @return array
+	 */
+	function connectsso_config_defaults() {
+		return array(
+			'token_ttl'            => 45,
+			'attempt_limit'        => 10,
+			'attempt_window'       => 300,
+			'allow_unbound_tokens' => true,
+		);
+	}
+
+	/**
+	 * Hard bounds for the numeric tunables, as array(min, max). A value outside
+	 * them is CLAMPED and reported — never obeyed, and never silently dropped:
+	 * the operator asked for something, so give them the nearest thing that is
+	 * still safe and say so.
+	 *
+	 *   token_ttl      5..60   the README's contract, and what tests/run.php
+	 *                          asserts. It is a hand-off window covering one
+	 *                          HTTP redirect; longer widens the window in which
+	 *                          a token scraped from an access log is still live.
+	 *                          Below 5 s a slow redirect fails legitimately.
+	 *   attempt_limit  1..1000 0 would refuse every visitor from an address
+	 *                          forever; past 1000 the limiter bounds nothing.
+	 *   attempt_window 60..86400
+	 *
+	 * @return array
+	 */
+	function connectsso_config_bounds() {
+		return array(
+			'token_ttl'      => array(5, 60),
+			'attempt_limit'  => array(1, 1000),
+			'attempt_window' => array(60, 86400),
+		);
+	}
+
+	/**
+	 * Keys that name a SECURITY-CRITICAL control, mapped to the reason they are
+	 * not yours to change. Present in the file they are ignored and reported by
+	 * name — deliberately distinct from "unrecognised key", which reads like a
+	 * typo. An operator who tried to turn one of these off must be told that it
+	 * is still on.
+	 *
+	 * @return array
+	 */
+	function connectsso_config_refused() {
+		$entropy = 'token entropy is fixed at 32 bytes (256 bits)';
+		$hashing = 'tokens are always stored as SHA-256 and never in clear';
+		$oneshot = 'a token is always burned on its first redemption';
+		$noadmin = 'administrator accounts can never be minted for';
+		$tls     = 'the TLS gate is not a setting; declare a reverse proxy in'
+			. ' security_settings.ini (reverse_proxy_panel_allowed) instead';
+
+		return array(
+			'token_bytes'   => $entropy,
+			'token_entropy' => $entropy,
+			'token_hash'    => $hashing,
+			'hash_algo'     => $hashing,
+			'single_use'    => $oneshot,
+			'allow_reuse'   => $oneshot,
+			'allow_admin'   => $noadmin,
+			'require_tls'   => $tls,
+			'allow_http'    => $tls,
+		);
+	}
+
+	/**
+	 * Interpret an ini value as a boolean. Returns null when it is neither,
+	 * so the caller can complain rather than guess.
+	 *
+	 * parse_ini_file() with INI_SCANNER_TYPED already turns yes/no/true/false/
+	 * on/off into real booleans; the string forms are handled too because an
+	 * older PHP falls back to INI_SCANNER_NORMAL, where they arrive as strings.
+	 *
+	 * @param mixed $value
+	 * @return bool|null
+	 */
+	function connectsso_config_bool($value) {
+		if (is_bool($value)) {
+			return $value;
+		}
+		if (is_int($value)) {
+			return $value === 1 ? true : ($value === 0 ? false : null);
+		}
+		if (!is_string($value)) {
+			return null;
+		}
+		$v = strtolower(trim($value));
+		if (in_array($v, array('1', 'yes', 'true', 'on'), true)) {
+			return true;
+		}
+		if (in_array($v, array('0', 'no', 'false', 'off'), true)) {
+			return false;
+		}
+
+		return null;
+	}
+
+	/**
+	 * Where the override file lives.
+	 *
+	 * CONNECTSSO_CONFIG_FILE, if something defined it before this file loaded,
+	 * wins outright — that is the seam tests/run.php drives, and it is the only
+	 * way an operator could relocate the file.
+	 *
+	 * Otherwise ISPC_LIB_PATH, which config.inc.php defines as
+	 * ISPC_ROOT_PATH . '/lib' — i.e. <ispconfig>/interface/lib
+	 * (install/tpl/config.inc.php.master:99-100). Both halves of this module run
+	 * after that file, so on a panel this is always the answer.
+	 *
+	 * The last resort walks up from this file, for a CLI context with no panel
+	 * bootstrap. Note it is deliberately NOT the primary: with
+	 * `./install.sh --symlink` __DIR__ resolves into the clone, not the panel.
+	 *
+	 * @return string
+	 */
+	function connectsso_config_path() {
+		if (defined('CONNECTSSO_CONFIG_FILE')) {
+			return (string)CONNECTSSO_CONFIG_FILE;
+		}
+		if (defined('ISPC_LIB_PATH')) {
+			return rtrim((string)ISPC_LIB_PATH, '/') . '/' . CONNECTSSO_CONFIG_NAME;
+		}
+		//* .../interface/web/connectsso/lib -> .../interface
+		$interface = realpath(__DIR__ . '/../../..');
+		if ($interface === false) {
+			$interface = __DIR__ . '/../../..';
+		}
+
+		return $interface . '/lib/' . CONNECTSSO_CONFIG_NAME;
+	}
+
+	/**
+	 * Read the override file into raw key => value pairs.
+	 *
+	 * Returns an empty array for every failure, so the caller always ends up
+	 * with the shipped defaults. A file that is MISSING is the normal case and
+	 * says nothing; a file that exists but could not be used appends to
+	 * $problems, because an operator who believes their settings are in force
+	 * when they are not is the failure this whole mechanism exists to avoid.
+	 *
+	 * @param string $path
+	 * @param array  $problems appended to
+	 * @return array
+	 */
+	function connectsso_config_read($path, &$problems) {
+		if (!is_array($problems)) {
+			$problems = array();
+		}
+		$path = (string)$path;
+		if ($path === '' || !file_exists($path)) {
+			return array();
+		}
+		if (is_dir($path)) {
+			$problems[] = $path . ' is a directory, not a file; no overrides were applied.';
+
+			return array();
+		}
+		if (!is_readable($path)) {
+			$problems[] = $path . ' exists but is not readable by the panel user;'
+				. ' no overrides were applied.';
+
+			return array();
+		}
+		//* process_sections = false: a [section] header the operator added for
+		//* tidiness is flattened away rather than hiding every key under it.
+		//* @: a syntax error raises a warning AND returns false; the complaint
+		//* below is the report, and a warning on an auth path is noise.
+		$flags = defined('INI_SCANNER_TYPED') ? INI_SCANNER_TYPED : INI_SCANNER_NORMAL;
+		$raw = @parse_ini_file($path, false, $flags);
+		if (!is_array($raw)) {
+			$problems[] = $path . ' could not be parsed as an ini file;'
+				. ' no overrides were applied.';
+
+			return array();
+		}
+
+		return $raw;
+	}
+
+	/**
+	 * Validate raw key => value pairs into the effective configuration.
+	 *
+	 * Total: it ALWAYS returns exactly the keys connectsso_config_defaults()
+	 * declares, whatever the file contained, so a caller can never be handed a
+	 * setting the module does not know about.
+	 *
+	 * @param mixed $raw      whatever connectsso_config_read() produced
+	 * @param array $problems appended to
+	 * @return array
+	 */
+	function connectsso_config_resolve($raw, &$problems) {
+		$values = connectsso_config_defaults();
+		if (!is_array($problems)) {
+			$problems = array();
+		}
+		if (!is_array($raw)) {
+			return $values;
+		}
+		$bounds  = connectsso_config_bounds();
+		$refused = connectsso_config_refused();
+
+		foreach ($raw as $key => $value) {
+			$name = strtolower(trim((string)$key));
+
+			if (isset($refused[$name])) {
+				$problems[] = "'" . $name . "' is not an overridable setting and was ignored: "
+					. $refused[$name] . '.';
+				continue;
+			}
+			if (!array_key_exists($name, $values)) {
+				$problems[] = "'" . $name . "' is not a recognised setting and was ignored"
+					. ' (settings this file accepts: ' . implode(', ', array_keys($values)) . ').';
+				continue;
+			}
+
+			if (is_bool($values[$name])) {
+				$bool = connectsso_config_bool($value);
+				if ($bool === null) {
+					$problems[] = "'" . $name . "' is not a yes/no value; keeping the default ("
+						. ($values[$name] ? 'yes' : 'no') . ').';
+					continue;
+				}
+				$values[$name] = $bool;
+				continue;
+			}
+
+			//* Whole numbers only. A float, an array or a word keeps the
+			//* default rather than becoming (int)0, which for attempt_limit
+			//* would have locked every visitor out.
+			if (!is_int($value)
+				&& !(is_string($value) && preg_match('/^[+-]?[0-9]+$/', trim($value)) === 1)
+			) {
+				$problems[] = "'" . $name . "' is not a whole number; keeping the default ("
+					. $values[$name] . ').';
+				continue;
+			}
+			$number = (int)$value;
+			$min = $bounds[$name][0];
+			$max = $bounds[$name][1];
+			if ($number < $min) {
+				$problems[] = "'" . $name . "' was " . $number . ', below the minimum of '
+					. $min . '; clamped to ' . $min . '.';
+				$number = $min;
+			} elseif ($number > $max) {
+				$problems[] = "'" . $name . "' was " . $number . ', above the maximum of '
+					. $max . '; clamped to ' . $max . '.';
+				$number = $max;
+			}
+			$values[$name] = $number;
+		}
+
+		return $values;
+	}
+
+	/**
+	 * Everything the override file was complained about, this request.
+	 *
+	 * A store rather than a constant because the list is built before the
+	 * constants exist. The $record parameter is INTERNAL — it is called exactly
+	 * once, from the load block below; everything else calls this with no
+	 * argument to read.
+	 *
+	 * @param array|null $record internal
+	 * @return array
+	 */
+	function connectsso_config_problems($record = null) {
+		static $problems = array();
+		if (is_array($record)) {
+			$problems = $record;
+		}
+
+		return $problems;
+	}
+
+	/**
+	 * Write any override-file complaints to the panel's own log, once per
+	 * request. Called from both halves once the request has proved itself, so
+	 * that an operator watching Monitor > System Log sees a broken
+	 * connectsso.ini without having to go looking for it.
+	 *
+	 * Not auth_log: a configuration complaint is not an authentication event.
+	 *
+	 * @param object $app
+	 * @return void
+	 */
+	function connectsso_config_report($app) {
+		static $reported = false;
+		if ($reported) {
+			return;
+		}
+		$reported = true;
+		$problems = connectsso_config_problems();
+		if (!$problems || !is_object($app) || !method_exists($app, 'log')) {
+			return;
+		}
+		$path = connectsso_config_path();
+		foreach ($problems as $problem) {
+			connectsso_audit($app, 'configuration problem in ' . $path . ': ' . $problem);
+		}
+	}
+
+	/**
+	 * The effective configuration as key=value lines. This is what
+	 * `./install.sh --status` prints, so the operator reads the numbers the
+	 * panel is actually running on rather than the numbers in the README.
+	 *
+	 * @return array
+	 */
+	function connectsso_config_describe() {
+		$path  = connectsso_config_path();
+		$lines = array(
+			'version=' . CONNECTSSO_VERSION,
+			'file=' . $path,
+			'present=' . (is_file($path) ? 'yes' : 'no'),
+			'token_ttl=' . CONNECTSSO_TOKEN_TTL,
+			'attempt_limit=' . CONNECTSSO_ATTEMPT_LIMIT,
+			'attempt_window=' . CONNECTSSO_ATTEMPT_WINDOW,
+			'allow_unbound_tokens=' . (CONNECTSSO_ALLOW_UNBOUND ? 'yes' : 'no'),
+		);
+		foreach (connectsso_config_problems() as $problem) {
+			//* One line per problem, and never a newline inside one.
+			$lines[] = 'problem=' . str_replace(array("\r", "\n"), ' ', $problem);
+		}
+
+		return $lines;
+	}
+}
+
 if (!defined('CONNECTSSO_VERSION')) {
 
 	define('CONNECTSSO_VERSION', '1.0.0');
@@ -55,16 +442,8 @@ if (!defined('CONNECTSSO_VERSION')) {
 	/** Query-string parameter the consumer page reads the token from. */
 	define('CONNECTSSO_TOKEN_PARAM', 'token');
 
-	/**
-	 * Token lifetime in seconds. This is a hand-off window, not a session: the
-	 * only thing that happens between minting and redeeming is one HTTP
-	 * redirect. Anything longer widens the window in which a token captured
-	 * from a web-server access log or a browser history entry is still live.
-	 * Keep <= 60.
-	 */
-	define('CONNECTSSO_TOKEN_TTL', 45);
-
-	/** Entropy of the token, in bytes, before hex encoding. 32 bytes = 256 bits. */
+	/** Entropy of the token, in bytes, before hex encoding. 32 bytes = 256 bits.
+	 *  NOT overridable — see connectsso_config_refused(). */
 	define('CONNECTSSO_TOKEN_BYTES', 32);
 
 	/**
@@ -74,9 +453,81 @@ if (!defined('CONNECTSSO_VERSION')) {
 	 */
 	define('CONNECTSSO_USED_RETENTION', 3600);
 
+	//* ---- the four tunables, resolved from the optional override file -------
+	//* Read once, here, because everything below is a constant: the values must
+	//* exist before the first define(). A missing file — the normal case — is
+	//* one stat(). Anything the file got wrong is CLAMPED or ignored, never
+	//* obeyed, and lands in $connectsso_problems.
+	$connectsso_problems = array();
+	$connectsso_config = connectsso_config_resolve(
+		connectsso_config_read(connectsso_config_path(), $connectsso_problems),
+		$connectsso_problems
+	);
+	connectsso_config_problems($connectsso_problems);
+
+	//* Backstop so a broken file is never silent, even in a context that never
+	//* reaches connectsso_config_report() — a direct include, a CLI tool, a
+	//* request that dies earlier (the TLS gate refuses before either half gets
+	//* that far). sys_log gets the same lines from the two request paths, and
+	//* ./install.sh --status prints them as a FAILED check.
+	//*
+	//* This IS one error-log line per request for as long as the file is broken,
+	//* including on the unauthenticated redemption endpoint. That is the
+	//* trade-off, taken deliberately: silence about a configuration the operator
+	//* believes is in force is the failure this whole mechanism exists to
+	//* prevent, and the volume is bounded by the same requests the web server is
+	//* already writing an access-log line for. The expensive sink — sys_log, a
+	//* database write — stays behind the gates in connectsso_config_report().
+	/** Most per-request error_log lines one broken override file may write. */
+	if (!defined('CONNECTSSO_CONFIG_LOG_LIMIT')) {
+		define('CONNECTSSO_CONFIG_LOG_LIMIT', 5);
+	}
+
+	//* Bounded on purpose: a file with 500 bad keys must not write 500 lines on
+	//* every request - that is an operator's typo turning the unauthenticated
+	//* redemption endpoint into a disk-filler. The first few problems are what
+	//* anyone needs to fix the file; the rest are counted, and ./install.sh
+	//* --status prints the full list on demand.
+	if ($connectsso_problems) {
+		$connectsso_shown = 0;
+		foreach ($connectsso_problems as $connectsso_problem) {
+			if ($connectsso_shown >= CONNECTSSO_CONFIG_LOG_LIMIT) {
+				error_log(sprintf(
+					'[connectsso] %s: %d further problem(s) not listed - run ./install.sh --status for all of them',
+					connectsso_config_path(),
+					count($connectsso_problems) - $connectsso_shown
+				));
+				break;
+			}
+			error_log('[connectsso] ' . connectsso_config_path() . ': ' . $connectsso_problem);
+			$connectsso_shown++;
+		}
+		unset($connectsso_problem, $connectsso_shown);
+	}
+
+	/**
+	 * Token lifetime in seconds. This is a hand-off window, not a session: the
+	 * only thing that happens between minting and redeeming is one HTTP
+	 * redirect. Anything longer widens the window in which a token captured
+	 * from a web-server access log or a browser history entry is still live.
+	 * Clamped to 5..60 — see connectsso_config_bounds().
+	 */
+	define('CONNECTSSO_TOKEN_TTL', $connectsso_config['token_ttl']);
+
 	/** Redemption rate limit: attempts per source IP inside the window. */
-	define('CONNECTSSO_ATTEMPT_LIMIT', 10);
-	define('CONNECTSSO_ATTEMPT_WINDOW', 300);
+	define('CONNECTSSO_ATTEMPT_LIMIT', $connectsso_config['attempt_limit']);
+	define('CONNECTSSO_ATTEMPT_WINDOW', $connectsso_config['attempt_window']);
+
+	/**
+	 * May a token be minted with an empty bind_ip? Panels where the operator
+	 * knows the panel and the calling system see the same client address can
+	 * turn this off and make IP binding mandatory. Default: allowed, because
+	 * binding fails outright behind a CDN or a proxy that does not set
+	 * REMOTE_ADDR — see the README's note on bind_ip.
+	 */
+	define('CONNECTSSO_ALLOW_UNBOUND', $connectsso_config['allow_unbound_tokens']);
+
+	unset($connectsso_config, $connectsso_problems);
 
 	define('CONNECTSSO_TOKEN_TABLE', 'connectsso_token');
 	define('CONNECTSSO_ATTEMPT_TABLE', 'connectsso_attempt');

@@ -1,0 +1,119 @@
+; ispconfig-sso — optional configuration override.
+; Copyright (c) 2026 Wade Beckett. GPLv3 — see ../LICENSE.
+;
+; ============================================================================
+; THIS FILE IS AN EXAMPLE. Copy it into place; do not edit it here.
+;
+;   cp conf/connectsso.ini.example /usr/local/ispconfig/interface/lib/connectsso.ini
+;   chown ispconfig:ispconfig      /usr/local/ispconfig/interface/lib/connectsso.ini
+;   chmod 640                      /usr/local/ispconfig/interface/lib/connectsso.ini
+;
+; Check what the panel actually ended up running on:
+;
+;   ./install.sh --status /usr/local/ispconfig
+; ============================================================================
+;
+; WHY THE FILE LIVES THERE, above the panel's document root:
+;
+;   - It cannot be fetched over HTTP. The panel vhost roots at
+;     <ispconfig>/interface/web/ (install/tpl/apache_ispconfig.vhost.master
+;     DocumentRoot, install/tpl/nginx_ispconfig.vhost.master root).
+;     interface/lib/ is the directory above that, where ISPConfig keeps its own
+;     config.inc.php. No request can reach it.
+;   - ./install.sh never writes it and ./uninstall.sh never deletes it. The
+;     installer only ever creates and removes interface/web/connectsso; your
+;     configuration is not the installer's to destroy. The uninstaller prints
+;     the path and leaves the file where it is.
+;   - An ISPConfig upgrade leaves it alone. install_ispconfig() deploys the
+;     interface with `cp -rf ../interface <install_dir>`
+;     (install/lib/installer_base.lib.php:3599) — a merge, not a replace, which
+;     is the same reason the module directory itself survives — and then
+;     re-runs `chown -R ispconfig:ispconfig <install_dir>/interface` (:3774), so
+;     the panel can still read it afterwards.
+;
+; This is NOT security_settings.ini, which would have been the obvious home:
+; the ISPConfig installer rewrites that file from a master template on every
+; install and upgrade (installer_base.lib.php:3613-3618), so a setting placed
+; there would be silently lost — the exact failure this file exists to prevent.
+;
+; ----------------------------------------------------------------------------
+; WHAT YOU CAN CHANGE — the whole list is below. Every setting is OPTIONAL:
+; delete a line and its shipped default applies. Every value is validated and
+; CLAMPED to the range in its comment; a value outside the range is corrected,
+; not obeyed, and the correction is written to Monitor > System Log and shown
+; by ./install.sh --status. A key this file does not recognise is ignored and
+; reported — a typo never silently does nothing.
+;
+; A file that cannot be parsed leaves EVERY shipped default in force and is
+; complained about loudly. Single sign-on keeps working; it just ignores you.
+; ----------------------------------------------------------------------------
+
+; How long a minted token stays redeemable, in seconds.
+;
+; This is a hand-off window, not a session: the only thing that happens between
+; minting and redeeming is one HTTP redirect. Longer widens the window in which
+; a token scraped from a web-server access log or a browser history entry is
+; still live. Raise it only if your customers genuinely fail to complete the
+; redirect in time.
+;
+; Range 5-60. Default 45.
+;token_ttl = 45
+
+; Rate limit on the redemption endpoint: failed attempts allowed from one source
+; address inside the window below, before it is refused with 429. This is the
+; same budget ISPConfig's own remote API applies (remoting.inc.php:94).
+;
+; Only refusals reached by presenting a token value that did not check out are
+; counted — see the README's security model. Note that behind a proxy which
+; does not set REMOTE_ADDR, every visitor shares one bucket, which is a reason
+; to raise this rather than lower it.
+;
+; Range 1-1000. Default 10. (0 is not accepted: it would refuse everyone,
+; forever, and is corrected to 1.)
+;attempt_limit = 10
+
+; The window those attempts are counted in, in seconds.
+;
+; Range 60-86400. Default 300.
+;attempt_window = 300
+
+; May a token be minted with no bind_ip, i.e. redeemable from any address?
+;
+; Turn this off ONLY if you are sure the panel and your billing system see the
+; same client address. When they do not — a CDN or reverse proxy in front of
+; either, a proxy that does not set REMOTE_ADDR, an IPv4/IPv6 asymmetry — every
+; single sign-on attempt fails, because the caller is then forced to supply a
+; bind IP that will never match. With it off, a mint that passes an empty
+; bind_ip is refused with:
+;
+;   This panel requires single sign-on tokens to be bound to an IP address.
+;
+; yes or no. Default yes.
+;allow_unbound_tokens = yes
+
+; ----------------------------------------------------------------------------
+; WHAT YOU CANNOT CHANGE, and why it is not an oversight
+;
+; A token is a password substitute. The settings above tune how long it lives
+; and how hard it is to guess at; the controls below are what make a leaked one
+; worth almost nothing, and none of them is a knob:
+;
+;   token entropy      32 bytes (256 bits) from random_bytes(), always.
+;   hashing at rest    SHA-256, always. The clear token is never stored and
+;                      never logged, so reading the table yields no login.
+;   single use         the first redemption burns it, always. The guard is a
+;                      conditional UPDATE and its affected-row count.
+;   administrators     sys_user.typ = 'admin' is refused at mint AND again at
+;                      redemption, always. There is no flag for this.
+;   TLS                both halves refuse a plaintext request. If a reverse
+;                      proxy terminates TLS for you, declare THAT — in
+;                      ISPConfig's own security_settings.ini, [permissions],
+;                      reverse_proxy_panel_allowed. It is not a setting here.
+;
+; Keys naming any of them are refused BY NAME, with the reason, so nobody is
+; left believing they turned one off. In full, the refused names are:
+;
+;   token_bytes, token_entropy   token_hash, hash_algo
+;   single_use,  allow_reuse     allow_admin
+;   require_tls, allow_http
+; ----------------------------------------------------------------------------

@@ -143,6 +143,11 @@ class remoting_connectsso extends remoting {
 			);
 		}
 
+		//* The request has now proved itself, so an override file the operator
+		//* got wrong can be reported without an anonymous caller being able to
+		//* turn a broken connectsso.ini into a sys_log flood. Once per request.
+		connectsso_config_report($app);
+
 		$client_id = intval($client_id);
 		if ($client_id < 1) {
 			$this->refuse(
@@ -160,6 +165,23 @@ class remoting_connectsso extends remoting {
 				'the bind IP is not a literal address',
 				'invalid_bind_ip',
 				'The bind IP address is invalid.'
+			);
+		}
+
+		//* An operator whose panel and calling system genuinely see the same
+		//* client address can make IP binding mandatory, with
+		//* allow_unbound_tokens = no in the override file. Off by default: on
+		//* most topologies binding fails outright (a CDN, a proxy that does not
+		//* set REMOTE_ADDR, an IPv4/IPv6 asymmetry), and a setting that breaks
+		//* every login is worse than an unbound token that expires in 45
+		//* seconds. The message names the cause because the caller is a
+		//* sysadmin's own integration, not a visitor.
+		if ($bind_ip === '' && !CONNECTSSO_ALLOW_UNBOUND) {
+			$this->refuse(
+				$client_id,
+				'no bind IP was supplied and allow_unbound_tokens is off in ' . connectsso_config_path(),
+				'sso_bind_ip_required',
+				'This panel requires single sign-on tokens to be bound to an IP address.'
 			);
 		}
 

@@ -114,6 +114,12 @@ if (connectsso_attempts($app, $connectsso_ip, $connectsso_now) >= CONNECTSSO_ATT
 	connectsso_refuse('rate limit reached', 429);
 }
 
+//* An override file the operator got wrong is reported here, once per request,
+//* and deliberately AFTER the rate-limit gate: this endpoint is unauthenticated,
+//* so the limiter is the only thing that stops a broken connectsso.ini becoming
+//* a sys_log flood. The mint half reports it too, behind its own auth gates.
+connectsso_config_report($app);
+
 //* ---------------------------------------------------------------- the token
 //* GET is what a redirect can carry, so that is the primary form; POST is
 //* accepted too, for callers able to submit a form (it keeps the token out of

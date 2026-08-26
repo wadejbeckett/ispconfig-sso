@@ -156,6 +156,118 @@ class FakeApp {
 }
 
 // ---------------------------------------------------------------------------
+// CHILD PROBE MODE — how the override file is tested end to end.
+//
+// The tunables become CONSTANTS at include time, so ONE php process can only
+// ever observe ONE override file. The override section further down therefore
+// re-executes this script as a child, once per scenario, and asserts on what
+// the child reports. This block is that child: it defines the two constants
+// that steer where the module looks for its override file, loads the module for
+// real (same file, same include path, same code the panel runs), exercises the
+// one refusal that exists only when unbound tokens are turned off, and prints a
+// single JSON line.
+//
+//   php tests/run.php --config-probe <ini-path|''> [ISPC_LIB_PATH]
+//
+// It is placed HERE, after the stand-ins and before the first check, because
+// the constants must be defined before the module is included and the module
+// must be included after `remoting` exists.
+// ---------------------------------------------------------------------------
+if (isset($argv[1]) && $argv[1] === '--config-probe') {
+    $probe_ini = isset($argv[2]) ? $argv[2] : '';
+    $probe_lib = isset($argv[3]) ? $argv[3] : '';
+    if ($probe_ini !== '') { define('CONNECTSSO_CONFIG_FILE', $probe_ini); }
+    if ($probe_lib !== '') { define('ISPC_LIB_PATH', $probe_lib); }
+
+    require_once __DIR__ . '/../interface/web/connectsso/lib/classes/remote.d/connectsso.inc.php';
+
+    $_SERVER['HTTPS'] = 'on';
+    $probe_user   = array('userid' => 9, 'username' => 'acmeltd', 'active' => 1, 'typ' => 'user');
+    $probe_client = array('locked' => 'n', 'canceled' => 'n');
+    $probe_sso    = new remoting_connectsso();
+
+    //* An UNBOUND mint. Succeeds on a stock panel; refused only where the
+    //* override file turned unbound tokens off, which is the whole point of
+    //* that setting.
+    $app = new FakeApp();
+    $app->db->rows = array($probe_user, $probe_client);
+    $probe_unbound_fault = '';
+    try {
+        $probe_sso->connect_sso_token_create('sid', 5, '');
+    } catch (SoapFault $e) {
+        $probe_unbound_fault = $e->getMessage();
+    }
+    $probe_unbound_audit  = implode(' | ', $app->log) . ' ~~ ' . implode(' | ', $app->authlog);
+    $probe_unbound_minted = count($app->db->writesMatching('INSERT INTO `' . CONNECTSSO_TOKEN_TABLE . '`'));
+
+    //* A BOUND mint. Must succeed under EVERY configuration — no override may
+    //* turn single sign-on off by accident.
+    $app = new FakeApp();
+    $app->db->rows = array($probe_user, $probe_client);
+    $probe_bound_ttl   = -1;
+    $probe_bound_fault = '';
+    try {
+        $probe_ticket    = $probe_sso->connect_sso_token_create('sid', 5, '203.0.113.9');
+        $probe_bound_ttl = (int)$probe_ticket['expires_in'];
+    } catch (SoapFault $e) {
+        $probe_bound_fault = $e->getMessage();
+    }
+
+    echo json_encode(array(
+        'path'            => connectsso_config_path(),
+        'ttl'             => CONNECTSSO_TOKEN_TTL,
+        'limit'           => CONNECTSSO_ATTEMPT_LIMIT,
+        'window'          => CONNECTSSO_ATTEMPT_WINDOW,
+        'unbound_allowed' => CONNECTSSO_ALLOW_UNBOUND,
+        'problems'        => connectsso_config_problems(),
+        'describe'        => connectsso_config_describe(),
+        'unbound_fault'   => $probe_unbound_fault,
+        'unbound_audit'   => $probe_unbound_audit,
+        'unbound_minted'  => $probe_unbound_minted,
+        'bound_ttl'       => $probe_bound_ttl,
+        'bound_fault'     => $probe_bound_fault,
+    )), "\n";
+    exit(0);
+}
+
+/** Run one child probe and decode its report. */
+function config_probe($ini, $lib_path = '') {
+    //* stderr is discarded on purpose: a broken override file writes its
+    //* complaint to the PHP error log as a backstop, and in CLI that is stderr.
+    //* The parent asserts on the structured 'problems' list instead.
+    $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__FILE__)
+        . ' --config-probe ' . escapeshellarg((string)$ini) . ' ' . escapeshellarg((string)$lib_path)
+        . ' 2>/dev/null';
+    $decoded = json_decode((string)shell_exec($cmd), true);
+
+    return is_array($decoded) ? $decoded : array();
+}
+
+$TMP_FILES = array();
+$TMP_DIR   = sys_get_temp_dir() . '/connectsso-harness-' . getmypid();
+
+/** Write one throwaway ini file and return its path. */
+function tmp_ini($contents) {
+    global $TMP_FILES, $TMP_DIR;
+    static $n = 0;
+    if (!is_dir($TMP_DIR)) { @mkdir($TMP_DIR, 0700, true); }
+    $path = $TMP_DIR . '/cfg' . (++$n) . '.ini';
+    file_put_contents($path, $contents);
+    $TMP_FILES[] = $path;
+
+    return $path;
+}
+
+/** Does any complaint in $problems mention $needle? */
+function problem_mentions($problems, $needle) {
+    foreach ((array)$problems as $problem) {
+        if (stripos((string)$problem, $needle) !== false) { return true; }
+    }
+
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 section('remote.d auto-loader contract (remoting_handler_base.inc.php:44-74)');
 // ---------------------------------------------------------------------------
 
@@ -212,6 +324,13 @@ ok($names === array('session_id', 'client_id', 'bind_ip'),
 section('shared helpers');
 // ---------------------------------------------------------------------------
 
+//* install.sh --status compares the CONNECTSSO_VERSION of the INSTALLED module
+//* against this checkout's VERSION file to decide whether the panel is running
+//* what you have in front of you. If the two ever disagree here, that check
+//* reports a false mismatch on every panel.
+ok(CONNECTSSO_VERSION === trim((string)file_get_contents($module_root . '/VERSION')),
+    'CONNECTSSO_VERSION matches the VERSION file (' . CONNECTSSO_VERSION . ')');
+
 ok(CONNECTSSO_TOKEN_TTL > 0 && CONNECTSSO_TOKEN_TTL <= 60, 'token TTL is within 60 seconds');
 ok(CONNECTSSO_TOKEN_BYTES >= 32, 'at least 32 bytes of entropy');
 ok(CONNECTSSO_REMOTE_FUNCTION === 'connect_sso_token_create', 'grant name matches the method name');
@@ -235,6 +354,315 @@ ok(connectsso_ip_equals('2001:db8::1', '2001:0db8:0000:0000:0000:0000:0000:0001'
 ok(!connectsso_ip_equals('2001:db8::1', '192.0.2.1'), 'IPv6 does not match IPv4');
 ok(!connectsso_ip_equals('not-an-ip', 'not-an-ip'), 'garbage never compares equal');
 ok(!connectsso_ip_equals('', ''), 'empty never compares equal');
+
+// ---------------------------------------------------------------------------
+section('override file — defaults, validation and clamping');
+// ---------------------------------------------------------------------------
+//* Every tunable used to be a define() inside a shipped file, so an operator who
+//* changed the token lifetime lost it on the next update. The override file is
+//* the fix: an optional ini the installer never writes and never deletes.
+//*
+//* These checks drive the parser and the clamps directly, as pure functions.
+//* The section after this one proves the file actually REACHES the constants,
+//* which needs a child process — constants are set at include time.
+
+$defaults = connectsso_config_defaults();
+ok($defaults === array(
+    'token_ttl'            => 45,
+    'attempt_limit'        => 10,
+    'attempt_window'       => 300,
+    'allow_unbound_tokens' => true,
+), 'the shipped defaults are 45 s TTL, 10 attempts, a 300 s window, unbound allowed');
+
+$p = array();
+ok(connectsso_config_resolve(array(), $p) === $defaults && $p === array(),
+    'no overrides at all -> the shipped defaults, silently');
+
+$p = array();
+ok(connectsso_config_resolve(array(
+    'token_ttl'            => 30,
+    'attempt_limit'        => 5,
+    'attempt_window'       => 120,
+    'allow_unbound_tokens' => false,
+), $p) === array(
+    'token_ttl'            => 30,
+    'attempt_limit'        => 5,
+    'attempt_window'       => 120,
+    'allow_unbound_tokens' => false,
+) && $p === array(), 'every in-range override is taken as given, with no complaint');
+
+//* Numbers arriving as strings: parse_ini_file() only types them when
+//* INI_SCANNER_TYPED is available, so both forms must work.
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => '30'), $p)['token_ttl'] === 30 && $p === array(),
+    'a numeric string is accepted and returned as an int');
+
+//* ---- clamping. An out-of-range value is CLAMPED, never obeyed and never
+//* silently dropped: the operator asked for something, so give them the nearest
+//* thing that is still safe and say what happened.
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => 3600), $p)['token_ttl'] === 60
+    && problem_mentions($p, 'clamped'), 'token_ttl 3600 clamps to 60 and complains');
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => 0), $p)['token_ttl'] === 5
+    && problem_mentions($p, 'clamped'), 'token_ttl 0 clamps to 5 and complains');
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => -900), $p)['token_ttl'] === 5,
+    'a negative token_ttl clamps to the minimum');
+$p = array();
+ok(connectsso_config_resolve(array('attempt_limit' => 0), $p)['attempt_limit'] === 1,
+    'attempt_limit 0 clamps to 1 — zero would lock every visitor out permanently');
+$p = array();
+ok(connectsso_config_resolve(array('attempt_limit' => 999999), $p)['attempt_limit'] === 1000,
+    'attempt_limit 999999 clamps to 1000 — beyond that it bounds nothing');
+$p = array();
+ok(connectsso_config_resolve(array('attempt_window' => 5), $p)['attempt_window'] === 60,
+    'attempt_window 5 clamps to 60');
+$p = array();
+ok(connectsso_config_resolve(array('attempt_window' => 999999), $p)['attempt_window'] === 86400,
+    'attempt_window 999999 clamps to 86400');
+
+//* ---- booleans
+$bool_fail = array();
+foreach (array(false, 'no', 'No', 'off', 'false', '0', 0) as $falsey) {
+    $p = array();
+    $got = connectsso_config_resolve(array('allow_unbound_tokens' => $falsey), $p);
+    if ($got['allow_unbound_tokens'] !== false || $p !== array()) {
+        $bool_fail[] = var_export($falsey, true);
+    }
+}
+ok(empty($bool_fail), 'every spelling of "no" turns unbound tokens off'
+    . (empty($bool_fail) ? '' : ': ' . implode(', ', $bool_fail) . ' did not'));
+
+$bool_fail = array();
+foreach (array(true, 'yes', 'YES', 'on', 'true', '1', 1) as $truthy) {
+    $p = array();
+    $got = connectsso_config_resolve(array('allow_unbound_tokens' => $truthy), $p);
+    if ($got['allow_unbound_tokens'] !== true || $p !== array()) {
+        $bool_fail[] = var_export($truthy, true);
+    }
+}
+ok(empty($bool_fail), 'every spelling of "yes" leaves unbound tokens on'
+    . (empty($bool_fail) ? '' : ': ' . implode(', ', $bool_fail) . ' did not'));
+
+$p = array();
+ok(connectsso_config_resolve(array('allow_unbound_tokens' => 'maybe'), $p)['allow_unbound_tokens'] === true
+    && problem_mentions($p, 'allow_unbound_tokens'),
+    'a value that is neither yes nor no keeps the default and complains');
+
+//* ---- garbage in a numeric field keeps the default rather than becoming 0.
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => 'soon'), $p)['token_ttl'] === 45
+    && problem_mentions($p, 'token_ttl'), 'a non-numeric token_ttl keeps the default and complains');
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => 30.5), $p)['token_ttl'] === 45,
+    'a fractional token_ttl keeps the default');
+$p = array();
+ok(connectsso_config_resolve(array('token_ttl' => array(30)), $p)['token_ttl'] === 45,
+    'an array value keeps the default');
+
+//* ---- unknown keys are ignored, loudly. A typo must not look like it worked.
+$p = array();
+$got = connectsso_config_resolve(array('token_lifetime' => 30), $p);
+ok($got === $defaults && problem_mentions($p, 'token_lifetime'),
+    'an unrecognised key changes nothing and is named in the complaint');
+
+//* ---- SECURITY-CRITICAL keys are refused BY NAME, with a reason. The point of
+//* the override file is that the operator can tune the safe knobs; it must not
+//* become a way to turn the module's guarantees off.
+$refusable = array('token_bytes', 'token_entropy', 'token_hash', 'hash_algo',
+    'single_use', 'allow_reuse', 'allow_admin', 'require_tls', 'allow_http');
+$not_refused = array();
+foreach ($refusable as $key) {
+    $p = array();
+    $got = connectsso_config_resolve(array($key => 'whatever-i-want'), $p);
+    //* refused: nothing changes, and the complaint names the key AND says it is
+    //* not overridable — not merely "unrecognised", which would read like a typo.
+    if ($got !== $defaults || !problem_mentions($p, $key) || !problem_mentions($p, 'not an overridable')) {
+        $not_refused[] = $key;
+    }
+}
+ok($not_refused === array(),
+    count($refusable) . ' security-critical keys are refused by name'
+    . ($not_refused ? ': ' . implode(', ', $not_refused) . ' were not' : ''));
+
+//* Nothing the file contains can ever add a key the module did not define.
+$p = array();
+$got = connectsso_config_resolve(array('token_ttl' => 20, 'nonsense' => 1, 'allow_admin' => 'yes'), $p);
+ok(array_keys($got) === array_keys($defaults), 'the resolved set never grows a key of its own');
+ok($got['token_ttl'] === 20 && count($p) === 2,
+    'a good key still applies when it shares the file with a bad one, and both bad ones complain');
+
+//* Case and whitespace in key names: an ini file is hand-edited.
+$p = array();
+ok(connectsso_config_resolve(array('  TOKEN_TTL  ' => 30), $p)['token_ttl'] === 30,
+    'key names are matched case-insensitively and trimmed');
+
+//* A non-array (what a failed parse hands back) must degrade to defaults.
+$p = array();
+ok(connectsso_config_resolve(false, $p) === $defaults, 'a failed parse resolves to the defaults');
+
+// ---------------------------------------------------------------------------
+section('override file — reading it off disk');
+// ---------------------------------------------------------------------------
+
+$p = array();
+ok(connectsso_config_read($TMP_DIR . '/definitely-not-there.ini', $p) === array() && $p === array(),
+    'no override file at all is the normal case and says nothing');
+
+$p = array();
+$file = tmp_ini("; a comment\ntoken_ttl = 30\nattempt_limit = 5\nallow_unbound_tokens = no\n");
+$raw = connectsso_config_read($file, $p);
+ok($p === array(), 'a well-formed file parses without complaint');
+$resolved = connectsso_config_resolve($raw, $p);
+ok($resolved['token_ttl'] === 30 && $resolved['attempt_limit'] === 5
+    && $resolved['allow_unbound_tokens'] === false && $resolved['attempt_window'] === 300,
+    'values in the file win; anything absent from it keeps the shipped default');
+
+$p = array();
+ok(connectsso_config_read(tmp_ini(''), $p) === array() && $p === array(),
+    'an empty file is not an error');
+$p = array();
+ok(connectsso_config_read(tmp_ini("; nothing but comments\n; really\n"), $p) === array() && $p === array(),
+    'a comments-only file is not an error');
+
+//* parse_ini_file() ignores section headers when sections are not requested, so
+//* a file the operator organised into sections still works.
+$p = array();
+$sectioned = connectsso_config_read(tmp_ini("[connectsso]\ntoken_ttl = 20\n"), $p);
+ok(connectsso_config_resolve($sectioned, $p)['token_ttl'] === 20 && $p === array(),
+    'a [section] header is tolerated');
+
+//* ---- MALFORMED. Loudly, never silently: a file the operator believes is in
+//* force but which the module could not read is exactly the state that wastes
+//* an afternoon.
+$p = array();
+$broken = tmp_ini("token_ttl = 30\n[unterminated\n\"\n");
+ok(connectsso_config_read($broken, $p) === array() && problem_mentions($p, $broken),
+    'an unparseable file yields no overrides and complains, naming the path');
+
+$p = array();
+ok(connectsso_config_read($TMP_DIR, $p) === array() && problem_mentions($p, 'directory'),
+    'a directory where the file should be is reported, not fatal');
+
+//* Unreadable is only testable as a non-root user — root reads everything.
+$unreadable = tmp_ini("token_ttl = 30\n");
+@chmod($unreadable, 0000);
+if (!is_readable($unreadable)) {
+    $p = array();
+    ok(connectsso_config_read($unreadable, $p) === array() && problem_mentions($p, 'not readable'),
+        'a file the panel cannot read is reported, not silently skipped');
+} else {
+    ok(true, 'a file the panel cannot read is reported (skipped: running as root)');
+}
+@chmod($unreadable, 0600);
+
+//* ---- the shipped example. It is the only documentation an operator reads at
+//* the moment they are editing the file, so it must itself be valid, must name
+//* exactly the settings the resolver accepts, and must show the real defaults —
+//* an example naming a key the module ignores is worse than no example at all.
+$example = $module_root . '/conf/connectsso.ini.example';
+ok(is_file($example), 'conf/connectsso.ini.example ships with the project');
+
+$p = array();
+ok(connectsso_config_read($example, $p) === array() && $p === array(),
+    'the example parses cleanly and every setting in it is commented out,'
+    . ' so copying it into place changes nothing');
+
+$example_shown = array();
+foreach (preg_split('/\R/', (string)file_get_contents($example)) as $line) {
+    if (preg_match('/^;([a-z_]+)\s*=\s*(\S+)/', trim($line), $m)) {
+        $example_shown[$m[1]] = $m[2];
+    }
+}
+$example_keys = array_keys($example_shown);
+sort($example_keys);
+ok($example_keys === array('allow_unbound_tokens', 'attempt_limit', 'attempt_window', 'token_ttl'),
+    'the example documents exactly the four overridable settings (found: '
+    . implode(', ', $example_keys) . ')');
+
+$p = array();
+ok(connectsso_config_resolve($example_shown, $p) === $defaults && $p === array(),
+    'the values the example shows ARE the shipped defaults, so uncommenting a line'
+    . ' as-is changes nothing');
+
+//* Every security-critical key must be named in the example's "what you cannot
+//* change" list, or an operator has no way to learn it is refused.
+$example_text = (string)file_get_contents($example);
+$undocumented = array();
+foreach (array_keys(connectsso_config_refused()) as $key) {
+    if (strpos($example_text, $key) === false) { $undocumented[] = $key; }
+}
+ok($undocumented === array(),
+    'the example names every refused key'
+    . ($undocumented ? ': ' . implode(', ', $undocumented) . ' missing' : ''));
+
+// ---------------------------------------------------------------------------
+section('override file — end to end, in a child process');
+// ---------------------------------------------------------------------------
+//* Constants are set at include time, so this is the only honest way to prove
+//* the file reaches them. Each probe is a fresh php running the real module.
+
+$probe = config_probe('');
+ok($probe !== array(), 'the child probe runs and reports');
+ok(isset($probe['ttl']) && $probe['ttl'] === 45 && $probe['limit'] === 10
+    && $probe['window'] === 300 && $probe['unbound_allowed'] === true,
+    'with no override file the constants are the shipped defaults');
+ok(isset($probe['problems']) && $probe['problems'] === array(),
+    'with no override file there is nothing to complain about');
+ok(isset($probe['unbound_fault']) && $probe['unbound_fault'] === '' && $probe['unbound_minted'] === 1,
+    'with no override file an unbound mint succeeds');
+ok(isset($probe['bound_ttl']) && $probe['bound_ttl'] === 45,
+    'the TTL the caller is told matches the constant');
+
+$probe = config_probe(tmp_ini("token_ttl = 30\nattempt_limit = 5\nattempt_window = 120\n"));
+ok($probe['ttl'] === 30 && $probe['limit'] === 5 && $probe['window'] === 120,
+    'an override file really does change the constants the module runs on');
+ok($probe['bound_ttl'] === 30, 'the overridden TTL is what the caller is told');
+ok($probe['problems'] === array(), 'a valid override file produces no complaint');
+
+$probe = config_probe(tmp_ini("token_ttl = 9999\nattempt_limit = 0\n"));
+ok($probe['ttl'] === 60 && $probe['limit'] === 1, 'out-of-range values are clamped in the live constants');
+ok(count($probe['problems']) === 2, 'both clamps are reported');
+
+$probe = config_probe(tmp_ini("[unterminated\n\"\n"));
+ok($probe['ttl'] === 45 && $probe['limit'] === 10 && $probe['window'] === 300,
+    'an unparseable override file leaves the shipped defaults in force');
+ok(count($probe['problems']) === 1, 'and the unparseable file is complained about, not ignored');
+
+//* ---- the one refusal that exists only under an override.
+$probe = config_probe(tmp_ini("allow_unbound_tokens = no\n"));
+ok($probe['unbound_allowed'] === false, 'allow_unbound_tokens = no reaches the constant');
+ok($probe['unbound_fault'] === 'This panel requires single sign-on tokens to be bound to an IP address.',
+    'an unbound mint is then refused with a message that says why');
+ok($probe['unbound_minted'] === 0, 'and mints nothing');
+ok(strpos($probe['unbound_audit'], '[connectsso] refused') !== false
+    && substr_count($probe['unbound_audit'], '[connectsso] refused') >= 2,
+    'the bind-IP refusal is audited to sys_log AND auth.log, like every other refusal');
+ok($probe['bound_ttl'] === 45 && $probe['bound_fault'] === '',
+    'a BOUND mint still succeeds when unbound ones are disabled');
+
+//* ---- where the file lives. On a panel this is ISPC_LIB_PATH, which is
+//* <ispconfig>/interface/lib — above the docroot (<ispconfig>/interface/web),
+//* so it can never be fetched over HTTP.
+$probe = config_probe('', '/somewhere/interface/lib');
+ok($probe['path'] === '/somewhere/interface/lib/connectsso.ini',
+    'on a real panel the file is looked for in ISPC_LIB_PATH, above the docroot');
+ok(strpos($probe['path'], '/interface/web/') === false,
+    'and never inside the directory the panel serves over HTTP');
+
+//* ---- the machine-readable report install.sh --status parses.
+$probe = config_probe(tmp_ini("token_ttl = 25\n"));
+$described = implode("\n", $probe['describe']);
+ok(strpos($described, 'token_ttl=25') !== false
+    && strpos($described, 'attempt_limit=10') !== false
+    && strpos($described, 'attempt_window=300') !== false
+    && strpos($described, 'allow_unbound_tokens=yes') !== false
+    && strpos($described, 'present=yes') !== false,
+    'connectsso_config_describe() reports the effective configuration as key=value lines');
+$probe = config_probe(tmp_ini("token_ttl = 9999\n"));
+ok(problem_mentions($probe['describe'], 'problem='),
+    'and carries any complaint through to install.sh --status');
 
 // ---------------------------------------------------------------------------
 section('transport security (TLS gate)');
@@ -503,6 +931,12 @@ section('EVERY mint refusal is audited to both logs');
 //* at priority 2, to sys_log AND to auth.log — and none of them may contain a
 //* token. This table is the enumeration: add a refusal to the function without
 //* adding it here and the count assertion at the end fails.
+//*
+//* The mint function has ELEVEN refusal paths, not ten. The eleventh — no bind
+//* IP where the override file made binding mandatory — cannot be reached in
+//* this process, because CONNECTSSO_ALLOW_UNBOUND is a constant fixed at
+//* include time. It is covered in the child-probe section above, with the same
+//* two assertions this table makes: audited to both logs, and mints nothing.
 $refusals = array(
     'missing grant' => array(
         'perm' => false, 'session' => array('remote_userid' => 42, 'client_login' => 0),
@@ -576,7 +1010,9 @@ $_SERVER['HTTPS'] = 'on';
 remoting::$perm = true;
 remoting::$session = array('remote_userid' => 42, 'client_login' => 0);
 
-ok(count($refusals) === 10, 'the refusal table still enumerates 10 paths (found ' . count($refusals) . ')');
+ok(count($refusals) === 10,
+    'the refusal table still enumerates 10 in-process paths (found ' . count($refusals)
+    . '); the 11th, bind-IP-required, is covered by the child probe');
 ok($unaudited === array(),
     'every mint refusal writes an audit line to sys_log AND auth.log and mints nothing'
     . ($unaudited ? ': ' . implode(', ', $unaudited) . ' did not' : ''));
@@ -642,6 +1078,9 @@ ok(count(array_unique($seen)) === 200, '200 consecutive tokens are all distinct'
 ok(strlen($seen[0]) === CONNECTSSO_TOKEN_BYTES * 2, 'token length matches the configured entropy');
 
 // ---------------------------------------------------------------------------
+foreach ($TMP_FILES as $tmp) { @chmod($tmp, 0600); @unlink($tmp); }
+@rmdir($TMP_DIR);
+
 echo "\n";
 echo $FAILURES === 0
     ? "ALL OK — $CHECKS checks passed\n"

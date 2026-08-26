@@ -17,6 +17,18 @@ GPLv3. **No ISPConfig core file is modified**, read-only or otherwise — it ins
 `interface/web/connectsso/` through ISPConfig's own documented `remote.d` extension point and
 creates two tables of its own.
 
+### Which piece lives where
+
+Single sign-on always has two halves, on two different machines:
+
+| | Runs on | What it is | Required? |
+|---|---|---|---|
+| **The caller** | your billing server | Your own system — for example [**ISPConfig Connect for WHMCS**](https://github.com/wadejbeckett/ispconfig-connect-whmcs), a WHMCS provisioning module that creates, suspends, bills and terminates hosting accounts by talking to ISPConfig over its remote API | Yes — something has to ask for the login |
+| **This project** | the ISPConfig server | One remote function that mints a one-time token, and one page that redeems it | **Optional.** Everything else the caller does works without it; only the password-free *log in to panel* button needs it |
+
+Nothing here is WHMCS-specific, and no billing system ships this half — it is a panel add-on you
+install once on the panel, and [§3](#3-install-and-remove) is the whole setup.
+
 > ### ⚠ The panel must be served over HTTPS
 >
 > A token is a **password substitute travelling in a URL**. Over plain HTTP the mint response, the
@@ -45,8 +57,9 @@ creates two tables of its own.
 **It does:**
 
 - register **one** remote API function, `connect_sso_token_create`, which mints a 64-hex-character
-  token for one ISPConfig `client_id`, valid for **45 seconds**, redeemable **once**, and
-  optionally bound to a single source IP address;
+  token for one ISPConfig `client_id`, valid for **45 seconds by default** (an operator may retune
+  that within 5–60 — [*Tuning it*](#tuning-it--the-optional-override-file)), redeemable **once**,
+  and optionally bound to a single source IP address;
 - serve **one** page, `/connectsso/`, which redeems that token and builds the same panel session
   `interface/web/login/index.php` builds — same session keys, same start module, same theme gate —
   then redirects to the panel's own `/index.php`;
@@ -130,18 +143,75 @@ are free to be reworded.
 
 ## 3. Install and remove
 
-```sh
-./install.sh                       # /usr/local/ispconfig
-./install.sh /path/to/ispconfig    # elsewhere
-./install.sh --symlink             # development: serve straight from the clone
-```
+### The short path
 
-It copies `interface/web/connectsso/` into the panel, creates the module's two tables, and adds
-`connectsso` to each admin's `sys_user.modules`.
+Three steps, all of them on the ISPConfig server. They are the same whether you run the installer
+or do it by hand — only step 1 differs.
 
-That last step is what makes the permission checkbox appear: System → Remote Users builds its
-Functions list by including `<module>/lib/remote.conf.php` for the modules named in the **logged-in
-admin's** module column (`interface/web/admin/form/remote_user.tform.php:36-45`). Without it the
+1. **Put the module on the panel.** Either route below copies `interface/web/connectsso/` into the
+   panel, creates the module's two tables, and adds `connectsso` to each admin's
+   `sys_user.modules` — that last one is what makes the permission checkbox appear.
+
+   *Scripted:*
+
+   ```sh
+   ./install.sh                       # /usr/local/ispconfig
+   ./install.sh /path/to/ispconfig    # elsewhere
+   ./install.sh --symlink             # development: serve straight from the clone
+   ```
+
+   *By hand*, if you would rather see each piece (the `tar` pipe is what the installer uses, so
+   that VCS and editor state in the clone cannot land in a directory the panel serves over HTTP):
+
+   ```sh
+   tar cf - --exclude='.*' --exclude='node_modules' -C interface/web connectsso \
+     | tar xf - -C /usr/local/ispconfig/interface/web
+   chown -R ispconfig:ispconfig /usr/local/ispconfig/interface/web/connectsso
+   chmod -R go-w                /usr/local/ispconfig/interface/web/connectsso
+   php bin/connectsso_schema.php --install /usr/local/ispconfig/interface/lib/config.inc.php
+   php bin/connectsso_module.php --assign  /usr/local/ispconfig/interface/lib/config.inc.php
+   ```
+
+   (`sql/install.sql` is the same schema if you prefer to apply it against the ISPConfig database
+   yourself; `bin/connectsso_schema.php --check` exits 0 once both tables exist.)
+
+2. **Grant the function to your API user** — the installer deliberately does not touch anyone's
+   permissions:
+   **System → Remote Users → your API user → Functions →** tick
+   ***Panel single sign-on (one-time login token)*** **→ Save**.
+   If that checkbox is not on the form, log out and back in; if it later vanishes, see
+   [*Known caveat*](#known-caveat).
+
+3. **Confirm the panel is served over HTTPS.** Both halves refuse on a plaintext request — see the
+   box at the top of this file, including what to declare when a reverse proxy terminates TLS for
+   you.
+
+That is the entire install: no cron job, nothing to enable in the panel UI, and nothing to
+configure — the shipped defaults are the supported ones.
+
+### Then, on the billing side: nothing
+
+**The caller detects this project by itself.** There is no setting to switch on, no endpoint to
+paste, and no key to exchange — a client asks the panel what functions it has
+([§4.2](#42-detecting-whether-a-panel-has-it)) and offers its login button only where the answer
+includes `connect_sso_token_create`.
+
+For [ISPConfig Connect for WHMCS](https://github.com/wadejbeckett/ispconfig-connect-whmcs)
+specifically, that probe is cached per server and refreshed when WHMCS renders
+**Configuration → System Settings → Servers**, so the one thing to do after step 3 is **open that
+page once**. From the next page load on, services on that panel show a *Log in to ISPConfig*
+button. Nothing in the WHMCS module needs configuring for SSO, and nothing about it can be turned
+on for a panel that does not have this project installed. If the button does not appear, or appears
+and errors, that module's
+[troubleshooting section](https://github.com/wadejbeckett/ispconfig-connect-whmcs/blob/HEAD/docs/INSTALL.md#66-troubleshooting-single-sign-on)
+is keyed to the exact message you are looking at.
+
+### Why step 1 makes the checkbox appear
+
+The `sys_user.modules` part of step 1 is what makes step 2's checkbox exist at all: System →
+Remote Users builds its Functions list by including `<module>/lib/remote.conf.php` for the modules
+named in the **logged-in admin's** module column
+(`interface/web/admin/form/remote_user.tform.php:36-45`). Without it the
 checkbox never renders — and saving that form would then *drop* the grant, because a `CHECKBOXARRAY`
 field is rebuilt from the checkboxes that were posted (`tform_base.inc.php:828-833`, the `VARCHAR`
 case of `_encode()`: an array is `implode()`d, and nothing posted stores `''`).
@@ -149,13 +219,115 @@ case of `_encode()`: an array is `implode()`d, and nothing posted stores `''`).
 It does **not** put anything in the panel navigation: `nav.php` renders only modules that ship
 `lib/module.conf.php`, and this one deliberately ships none.
 
-**Then grant it**, which the installer will not do for you:
-System → Remote Users → your API user → Functions →
-tick *Panel single sign-on (one-time login token)* → Save.
-(If the box is missing, log out and back in — the list is built from the logged-in admin's modules.)
+### Checking it — `./install.sh --status`
 
-**And confirm the panel is HTTPS.** Both halves refuse on a plaintext request; see the box at the
-top of this file, including what to set when a reverse proxy terminates TLS for you.
+```sh
+./install.sh --status                    # /usr/local/ispconfig
+./install.sh --status /path/to/ispconfig
+```
+
+Ask the panel how single sign-on is doing. It is **strictly read-only** — no file, no table, no row
+is touched — so it is safe on a live panel, from cron, at 2am. Every line is `PASS`, `FAIL` or
+`INFO`, and every `FAIL` prints the exact command that fixes it. It **exits non-zero when anything
+essential is wrong**, so it works as a monitoring check. Run it as root: some of what it reads is.
+
+```
+ispconfig-sso 1.0.0 — status
+  panel:    /usr/local/ispconfig
+  checkout: /root/ispconfig-sso
+
+  [PASS] panel               ISPConfig found at /usr/local/ispconfig
+  [PASS] module directory    /usr/local/ispconfig/interface/web/connectsso
+  [PASS] version             1.0.0 installed, matching this checkout
+  [PASS] file contents       identical to this checkout
+  [PASS] extension point     core still auto-loads module remote.d classes
+  [PASS] database tables     connectsso_token and connectsso_attempt both present
+  [PASS] grant checkbox      'connectsso' is in the module list of all 2 admin(s)
+  [PASS] grant holders       2 remote user(s) hold connect_sso_token_create
+  [INFO]                     billing
+  [INFO]                     legacy (remote_access = n: usable only from 127.0.0.1 / ::1)
+  [PASS] remote API          remote_api_allowed = yes
+  [INFO] transport           no reverse proxy declared, so both halves require a real https request
+  [INFO] token lifetime      30 seconds
+  [INFO] rate limit          10 failed redemptions per 300s, per source address
+  [INFO] unbound tokens      no
+  [PASS] override file       /usr/local/ispconfig/interface/lib/connectsso.ini (in force, nothing wrong with it)
+
+  All checks passed. Single sign-on should work on this panel.
+```
+
+The two checks worth understanding:
+
+- **grant checkbox** fails when `connectsso` is missing from *any* admin's module list, not just all
+  of them. That is not pedantry: an admin who lacks it and saves System → Remote Users silently
+  **drops the grant** for everyone, for the reason in the section above. It names the admins that
+  are missing it.
+- **grant holders** fails when nobody holds `connect_sso_token_create`, because nothing can then
+  mint a token. Holders whose `remote_access` is `n` are listed but flagged — core restricts those
+  users to `127.0.0.1` / `::1` (`remoting.inc.php:195`), so the grant is real but unusable from
+  another machine.
+
+What it deliberately cannot tell you is anything off this box: whether your billing system can reach
+the panel over https, and whether that system's address is in the API user's Remote Access IP list.
+It says so when it finishes.
+
+### Tuning it — the optional override file
+
+Nothing needs configuring. But if you want to change the token lifetime or the rate limits, do it
+**here** rather than by editing the module, which loses the change on the next `./install.sh`:
+
+```sh
+cp conf/connectsso.ini.example /usr/local/ispconfig/interface/lib/connectsso.ini
+chown ispconfig:ispconfig      /usr/local/ispconfig/interface/lib/connectsso.ini
+chmod 640                      /usr/local/ispconfig/interface/lib/connectsso.ini
+./install.sh --status          # confirm what the panel actually picked up
+```
+
+The file is optional, every setting in it is optional, and it is read once per request. Copy it,
+uncomment what you want, delete the rest.
+
+| Setting | Default | Range | What it is |
+|---|---|---|---|
+| `token_ttl` | `45` | 5–60 | Seconds a minted token stays redeemable. It covers one HTTP redirect; longer widens the window in which a token scraped from an access log is still live. |
+| `attempt_limit` | `10` | 1–1000 | Failed redemptions allowed from one source address per window. Behind a proxy that does not set `REMOTE_ADDR`, every visitor shares one bucket — a reason to raise this, not lower it. |
+| `attempt_window` | `300` | 60–86400 | Seconds those attempts are counted over. |
+| `allow_unbound_tokens` | `yes` | yes/no | Whether a token may be minted with an empty `bind_ip`. Set `no` **only** if the panel and your billing system genuinely see the same client address ([§4.4](#44-about-bind_ip)); where they do not, every login fails. A mint with no `bind_ip` is then refused with `This panel requires single sign-on tokens to be bound to an IP address.` |
+
+**Why that path, and not somewhere more obvious.** `interface/lib/` is the directory *above* the
+panel's document root (`interface/web/`, per `install/tpl/apache_ispconfig.vhost.master:53` and
+`install/tpl/nginx_ispconfig.vhost.master:16`), so the file is not web-servable at all. `install.sh`
+only ever writes and removes `interface/web/connectsso`, so it never overwrites this, and
+`uninstall.sh` reports it rather than deleting it. And an ISPConfig upgrade deploys the interface
+with `cp -rf ../interface <install_dir>` (`install/lib/installer_base.lib.php:3599`) — a **merge**,
+which is the same reason the module directory itself survives — then re-runs
+`chown -R ispconfig:ispconfig <install_dir>/interface` (`:3774`), so the panel can still read it
+afterwards. It is deliberately **not** `security_settings.ini`, which would have been the obvious
+home: the ISPConfig installer rewrites that file from a master template on every install and upgrade
+(`:3613-3618`), so a setting placed there is silently lost — exactly the failure this file exists to
+prevent.
+
+#### What the file cannot do
+
+The four settings above tune how long a token lives and how hard it is to guess at. The controls
+that make a leaked token worth almost nothing are **not settings**, and a key naming one is refused
+**by name, with the reason**, rather than quietly ignored:
+
+| Refused key | Because |
+|---|---|
+| `token_bytes`, `token_entropy` | entropy is fixed at 32 bytes (256 bits) from `random_bytes()` |
+| `token_hash`, `hash_algo` | tokens are always stored as SHA-256 and never in clear |
+| `single_use`, `allow_reuse` | a token is always burned on its first redemption |
+| `allow_admin` | administrator accounts can never be minted for, at mint *or* redemption |
+| `require_tls`, `allow_http` | the TLS gate is not a setting; declare a reverse proxy in `security_settings.ini` instead |
+
+Everything else is validated the same way. A numeric value outside its range is **clamped**, not
+obeyed — `attempt_limit = 0` becomes `1` rather than locking every visitor out forever. A key the
+module does not recognise is reported, so a typo never looks like it worked. A file that cannot be
+read or parsed leaves **every** shipped default in force, and complains: to the PHP error log, to
+`sys_log` (Monitor → System Log) on both request paths, and as a `FAIL` line in
+`./install.sh --status`. Single sign-on keeps working; it just ignores you, loudly.
+
+### Removing it
 
 Uninstall reverses all three steps:
 
@@ -169,6 +341,11 @@ API request, `connect_sso_token_create` is simply not in the method map any more
 ISPConfig's own was changed, so there is nothing to restore. The uninstaller deliberately does *not*
 rewrite anyone's `remote_user.remote_functions`: a grant for a function that no longer exists is
 inert, and rewriting other people's permission rows is not an uninstaller's job.
+
+For the same reason it does **not delete your `connectsso.ini`**. The installer did not write that
+file, so the uninstaller does not get to remove it; it prints the path and leaves it where it is.
+Nothing reads it once `interface/web/connectsso/` is gone, and it is exactly what you want still
+sitting there if this uninstall is really the first half of a reinstall.
 
 ### Known caveat
 
@@ -444,6 +621,7 @@ message in this table.
 | `Single sign-on requires an encrypted (https) connection to the panel.` | the API request did not arrive over TLS and no reverse proxy is declared — see the box at the top |
 | `The client id must be an integer greater than zero.` | bad `client_id` |
 | `The bind IP address is invalid.` | `bind_ip` is not a literal IP |
+| `This panel requires single sign-on tokens to be bound to an IP address.` | `bind_ip` was empty and the operator set `allow_unbound_tokens = no` in `connectsso.ini`. You cannot see this on a default panel; a client that supports binding should pass the end user's address, and one that cannot should surface this message to the operator verbatim |
 | `There is no panel user for this client id.` | no `sys_user` row with that `client_id` |
 | `Single sign-on is not available for administrator accounts.` | target is an admin |
 | `The panel user for this client is not active.` | `sys_user.active != 1` |
@@ -512,7 +690,10 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   client and the panel user; it never writes the token or its hash.
 
 **Lifetime and use count**
-- **45 seconds** (`CONNECTSSO_TOKEN_TTL`; the test suite fails the build if it is set above 60). It covers one HTTP redirect, nothing more.
+- **45 seconds** by default (`CONNECTSSO_TOKEN_TTL`). It covers one HTTP redirect, nothing more. An
+  operator may change it in `connectsso.ini`, but only within **5–60**: a value outside that is
+  clamped and reported, not obeyed, so no configuration can widen the window past what the design
+  assumes. `./install.sh --status` prints the value actually in force.
 - **Single use.** The guard is a conditional `UPDATE … WHERE used_at IS NULL` whose affected-row
   count decides the winner — atomic in the database, so two simultaneous redemptions cannot both
   succeed. The `used_at` check before it is a fast path, not the lock. The endpoint also verifies
@@ -544,7 +725,9 @@ not "customers". Size the grant accordingly (see *A leaked API grant is a leaked
   endpoint matches it. Note that the panel's own **login form** is stricter and different —
   more than 5 failures within 1 minute (`login/index.php:61-68`) — so "same as ISPConfig" is not one
   number; this endpoint deliberately follows the API's. As in core, a request that arrives already at
-  the limit is refused *without* being counted, so hammering does not extend the block.
+  the limit is refused *without* being counted, so hammering does not extend the block. Both numbers
+  are adjustable in `connectsso.ini` within 1–1000 and 60–86400 respectively; `attempt_limit = 0` is
+  not one of the accepted values, because it would refuse every visitor from that address forever.
 - **What counts, exactly.** A failure counts when it was reached by **presenting a token value that
   did not check out**: malformed, unknown, expired, replayed, IP-binding mismatch, or a burn that did
   not take. Those are the guessing paths, and they are the ones the budget bounds.
@@ -659,6 +842,12 @@ Those two are the whole of it. Beyond them and the module's own two tables, noth
 writes ISPConfig-owned state: no schema change to an existing table, no new column, no row in
 `sys_datalog`.
 
+There is one file it **reads and never writes**: `<ispconfig>/interface/lib/connectsso.ini`, if you
+created one. Neither half writes to it, `install.sh` never overwrites it, and `uninstall.sh` reports
+it rather than deleting it. When it contains something the module could not use, both request paths
+log that to `sys_log` — once per request, and behind their own gates, so a broken file cannot be
+turned into a log flood by an anonymous caller.
+
 Audit lines go to `sys_log` (Monitor → System Log) for every mint, every refusal in **either** half —
 including a call from a remote user that does not hold the grant — and every successful sign-in.
 Core will not cover that first case for you: `checkPerm()`'s own `REMOTE-LIB DENY` line is written at
@@ -683,11 +872,17 @@ interface/web/connectsso/
     ├── remote.conf.php                        makes the grant a checkbox in the panel UI
     └── classes/remote.d/connectsso.inc.php    class remoting_connectsso — the mint function
 bin/connectsso_schema.php                      create / drop / check the two tables
-bin/connectsso_module.php                      add / remove 'connectsso' in sys_user.modules
+bin/connectsso_module.php                      add / remove / report 'connectsso' in sys_user.modules
+conf/connectsso.ini.example                    the optional override file, documented; copy it to
+                                               <ispconfig>/interface/lib/connectsso.ini
 sql/install.sql, sql/uninstall.sql             the schema itself
 tests/run.php                                  standalone harness (no panel, no database)
-install.sh, uninstall.sh
+install.sh, uninstall.sh                       install.sh --status is the read-only doctor
 ```
+
+Note what is **not** in that tree: anything installed outside `interface/web/connectsso/`. The one
+file that can exist elsewhere on a panel — `interface/lib/connectsso.ini` — is created by you, not
+by the installer, and neither script ever writes or deletes it.
 
 The PHP under `interface/` is written in ISPConfig's own PHP-5-compatible style (no namespaces, no
 `strict_types`, no typed properties) so it loads on every panel its host supports. The scripts under
@@ -711,12 +906,25 @@ happy path against a stand-in for `$app`, asserting among other things that:
 - **every** refusal writes an audit line to both `sys_log` and `auth.log` and mints nothing — that
   one is table-driven, so a refusal added to the function without being added to the table fails the
   count assertion rather than slipping through unaudited;
-- every SQL statement in the module survives core's `securityScan()`.
+- every SQL statement in the module survives core's `securityScan()`;
+- the override file is parsed, validated and clamped exactly as documented — every bound, every
+  refused security key, an unparseable file, an unreadable one, a directory in its place. Because
+  the tunables become **constants at include time**, one process can only ever see one override
+  file, so the harness re-executes itself as a child process per scenario and asserts on what the
+  child really loaded. That is also how the bind-IP-required refusal is covered, since it exists
+  only under `allow_unbound_tokens = no`;
+- `conf/connectsso.ini.example` itself parses, documents exactly the four settings the resolver
+  accepts, shows the real defaults, and names every refused key — an example that drifts from the
+  code fails the build.
 
 What it cannot cover is the redemption endpoint, which is a top-level script that redirects and
 exits. That half is verified by hand on a real panel; the harness prints the 18-item checklist when
 it finishes (replay, expiry, IP binding, rate limit, TLS gate, 2FA hand-off, session-id rotation, and
 the install/uninstall round trip).
+
+For a panel that already exists, the other half of verification is
+[`./install.sh --status`](#checking-it--installsh---status): the harness proves the code is right,
+`--status` proves *this* panel is set up right.
 
 ## 9. Compatibility
 
@@ -745,3 +953,9 @@ row needs no approval beyond being real and working.
 
 GPLv3 — see [LICENSE](LICENSE). Security reports go to security@noiz.co.za; see
 [SECURITY.md](SECURITY.md). Contributions welcome: [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+Part of the **ISPConfig Toolkit**, a family of independent ISPConfig tools by the same author:
+[ISPConfig Connect for WHMCS](https://github.com/wadejbeckett/ispconfig-connect-whmcs) ·
+[ISPConfig Theme Customizer](https://github.com/wadejbeckett/ispconfig-theme-customizer).
