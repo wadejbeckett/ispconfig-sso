@@ -148,7 +148,7 @@ class remoting_connectsso extends remoting {
 		//* turn a broken connectsso.ini into a sys_log flood. Once per request.
 		connectsso_config_report($app);
 
-		$client_id = intval($client_id);
+		$client_id = connectsso_client_id($client_id);
 		if ($client_id < 1) {
 			$this->refuse(
 				$client_id,
@@ -317,7 +317,7 @@ class remoting_connectsso extends remoting {
 
 		connectsso_audit(
 			$app,
-			'refused to mint a token for client ' . intval($client_id) . ': ' . $reason,
+			'refused to mint a token for client ' . connectsso_client_id($client_id) . ': ' . $reason,
 			true
 		);
 
