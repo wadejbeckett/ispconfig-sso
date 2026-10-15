@@ -552,7 +552,33 @@ if (!function_exists('connectsso_token_is_wellformed')) {
 		}
 		$expected = CONNECTSSO_TOKEN_BYTES * 2;
 
-		return strlen($token) === $expected && preg_match('/^[a-f0-9]+$/', $token) === 1;
+		//* /D: without it '$' also matches before a final newline.
+		return strlen($token) === $expected && preg_match('/^[a-f0-9]+$/D', $token) === 1;
+	}
+
+	/**
+	 * A client id as the remote API delivered it, or 0 when it is not a whole
+	 * number. intval() alone is NOT validation: it turns true and array(7) into
+	 * 1, '5abc' into 5, '1e3' into 1000 and 5.9 into 5 — each a different,
+	 * valid-looking client that a token would then be minted for. SOAP delivers
+	 * digit strings and JSON delivers ints (or, rarely, an integral float);
+	 * those are the only spellings accepted.
+	 *
+	 * @param mixed $value
+	 * @return int
+	 */
+	function connectsso_client_id($value) {
+		if (is_int($value)) {
+			return $value;
+		}
+		if (is_float($value)) {
+			return (is_finite($value) && $value == floor($value) && abs($value) < PHP_INT_MAX) ? (int)$value : 0;
+		}
+		if (is_string($value) && preg_match('/^[0-9]+$/D', trim($value)) === 1) {
+			return intval(trim($value));
+		}
+
+		return 0;
 	}
 
 	/**

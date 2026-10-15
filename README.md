@@ -619,7 +619,7 @@ message in this table.
 |---|---|
 | `You do not have the permissions to access this function.` | grant not ticked, **or** the session is a client login (`login(u, p, true)`) rather than a remote user's — client sessions can never mint (core wording for both, on purpose) |
 | `Single sign-on requires an encrypted (https) connection to the panel.` | the API request did not arrive over TLS and no reverse proxy is declared — see the box at the top |
-| `The client id must be an integer greater than zero.` | bad `client_id` |
+| `The client id must be an integer greater than zero.` | bad `client_id`: zero, negative, or not a whole number (`'5abc'`, `'1e3'`, `5.9`, `true`, an array are refused, never coerced) |
 | `The bind IP address is invalid.` | `bind_ip` is not a literal IP |
 | `This panel requires single sign-on tokens to be bound to an IP address.` | `bind_ip` was empty and the operator set `allow_unbound_tokens = no` in `connectsso.ini`. You cannot see this on a default panel; a client that supports binding should pass the end user's address, and one that cannot should surface this message to the operator verbatim |
 | `There is no panel user for this client id.` | no `sys_user` row with that `client_id` |

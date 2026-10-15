@@ -70,7 +70,7 @@ The date lands when the first tag does.
   (`--assign` / `--unassign` / `--status`) — the same steps as standalone, idempotent CLI tools.
   `--status` is read-only and reports the admin module list and the current grant holders.
 - `tests/run.php` — a dependency-free harness that replays core's `remote.d` auto-loader against the
-  module and drives the mint function through every refusal path and the happy path. 152 checks. It
+  module and drives the mint function through every refusal path and the happy path. 156 checks. It
   also prints the 18-item manual checklist for the redemption half, which cannot be covered without
   a real panel.
 - README integration guide: the full API contract, detection via `get_function_list`, a worked
@@ -104,6 +104,10 @@ Everything in this list is a deliberate property of 1.0.0, not a fix for a prior
   `auth.log` at a priority a shipped install actually keeps.
 - **Uniform refusals:** every token-related failure renders the identical 403 page, so the endpoint
   is never an oracle about someone else's token.
+- **`client_id` must be a whole number.** An int, a digit string or an integral float is accepted;
+  anything else (`true`, an array, `'5abc'`, `'1e3'`, `5.9`) is refused with the same
+  `The client id must be an integer greater than zero.` fault, rather than coerced by `intval()`
+  into a different client that a token would then have been minted for.
 - **Direct-request guards** on every `.php` under `lib/`, which the stock vhosts do not deny.
 - **The override file cannot weaken anything.** It accepts four settings and nothing else. Every
   numeric value is clamped to a documented range (`token_ttl` 5–60, `attempt_limit` 1–1000,

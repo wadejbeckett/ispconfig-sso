@@ -344,6 +344,9 @@ ok(!connectsso_token_is_wellformed(''), 'an empty token is rejected');
 ok(!connectsso_token_is_wellformed(null), 'a null token is rejected');
 ok(!connectsso_token_is_wellformed(array($sample)), 'an array is rejected');
 ok(!connectsso_token_is_wellformed(str_repeat('z', strlen($sample))), 'non-hex is rejected');
+//* PCRE's '$' also matches before a final newline unless /D is set, so 63 hex
+//* characters plus "\n" is the right LENGTH and used to pass the pattern.
+ok(!connectsso_token_is_wellformed(substr($sample, 0, -1) . "\n"), 'a trailing newline is rejected');
 ok(connectsso_token_hash($sample) === hash('sha256', $sample), 'the stored value is sha256(token)');
 ok(connectsso_token_hash($sample) !== $sample, 'the stored value is not the token');
 
@@ -887,6 +890,41 @@ ok(fault_from(function () use ($sso) { $sso->connect_sso_token_create('sid', -3,
 scenario($active_user, $open_client);
 ok(fault_from(function () use ($sso) { $sso->connect_sso_token_create('sid', 'abc', ''); }) !== '',
     'a non-numeric client id is refused');
+
+//* intval() coerces garbage into a DIFFERENT, valid-looking client id: true and
+//* array(7) both become 1, '5abc' becomes 5, '1e3' becomes 1000, 5.9 becomes 5.
+//* A caller bug that passes any of these must be refused, never minted for
+//* whichever client the coercion happened to land on.
+$coerced = array();
+foreach (array(true, array(7), '5abc', '1e3', 5.9, '12,13', '0x1A', '') as $bad_id) {
+    scenario($active_user, $open_client);
+    $fault = fault_from(function () use ($sso, $bad_id) { $sso->connect_sso_token_create('sid', $bad_id, ''); });
+    if ($fault !== 'The client id must be an integer greater than zero.'
+        || $app->db->writesMatching('INSERT INTO `' . CONNECTSSO_TOKEN_TABLE . '`') !== array()) {
+        $coerced[] = var_export($bad_id, true);
+    }
+}
+ok($coerced === array(), 'a client id that is not a whole number is refused, not coerced'
+    . ($coerced ? ': ' . implode(', ', str_replace("\n", '', $coerced)) . ' were not' : ''));
+scenario($active_user, array('locked' => 'y', 'canceled' => 'n'));
+fault_from(function () use ($sso) { $sso->connect_sso_token_create('sid', array(7), ''); });
+ok(strpos(implode(' | ', $app->log), 'for client 1:') === false,
+    'the audit line does not name the client a coerced id would have landed on');
+
+//* The spellings a real caller sends must keep working: SOAP delivers strings,
+//* JSON delivers ints (or, rarely, an integral float).
+$accepted = array();
+foreach (array(5, '5', ' 5 ', '005', 5.0) as $good_id) {
+    scenario($active_user, $open_client);
+    try {
+        $ticket = $sso->connect_sso_token_create('sid', $good_id, '');
+        if ($ticket['client_id'] !== 5) { $accepted[] = var_export($good_id, true); }
+    } catch (SoapFault $e) {
+        $accepted[] = var_export($good_id, true);
+    }
+}
+ok($accepted === array(), 'an int, a digit string and an integral float are all accepted as client 5'
+    . ($accepted ? ': ' . implode(', ', $accepted) . ' were not' : ''));
 
 scenario($active_user, $open_client);
 ok(fault_from(function () use ($sso) { $sso->connect_sso_token_create('sid', 5, 'evil.example.com'); })
