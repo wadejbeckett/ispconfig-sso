@@ -949,6 +949,16 @@ Nothing on that list is required, and nothing about it is privileged — it is a
 of dependencies. **Built something?** Open a pull request adding a row: name, one sentence, link. A
 row needs no approval beyond being real and working.
 
+## Support this project
+
+ispconfig-sso is free software from Noiz. If it is useful to you, the main way to support its development is a donation in Monero (XMR):
+
+```text
+44BtMn9izxH8mK2yFbSdY6Di7TNobkLbnHdZ6gZQjukCME5vsNhtPRtH4TcVkDHKHLhSpAJbsjv8gCdYuSZVMpXgMkUC1hV
+```
+
+You can also help by reporting bugs, sending fixes or starring the repository.
+
 ## Licence
 
 GPLv3 — see [LICENSE](LICENSE). Security reports go to security@noiz.co.za; see
