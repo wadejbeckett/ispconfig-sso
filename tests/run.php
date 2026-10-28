@@ -51,6 +51,31 @@ function fault_from(callable $fn) {
 }
 
 // ---------------------------------------------------------------------------
+// Stand-in for ext-soap's SoapFault, used only when the extension is not
+// loaded. Every refusal the module makes is a `throw new SoapFault($code,
+// $message)`; without ext-soap that line is a fatal "Class not found" error.
+// A panel always has ext-soap (the remote API is SOAP), but a developer's CLI
+// often does not, and the child probe below is a fresh `php` that does NOT
+// inherit `-d extension=soap` from the parent's command line. That is why the
+// five `allow_unbound_tokens = no` checks failed on their own: the only
+// refusal the probe exercises died before the probe could print its report.
+// The stand-in keeps the two things the harness relies on: the class name
+// (for `catch (SoapFault $e)`) and getMessage() returning the fault string.
+// ---------------------------------------------------------------------------
+if (!class_exists('SoapFault', false)) {
+    class SoapFault extends Exception {
+        public $faultcode;
+        public $faultstring;
+
+        public function __construct($code, $string) {
+            parent::__construct((string)$string);
+            $this->faultcode   = (string)$code;
+            $this->faultstring = (string)$string;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stand-in for ISPConfig's `remoting` base class, with the same PUBLIC surface
 // as 3.3.1p1 (login, logout, server_get, server_get_all, get_function_list) and
 // the same protected auth helpers our class inherits.
@@ -236,11 +261,17 @@ function config_probe($ini, $lib_path = '') {
     //* complaint to the PHP error log as a backstop, and in CLI that is stderr.
     //* The parent asserts on the structured 'problems' list instead.
     $cmd = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__FILE__)
-        . ' --config-probe ' . escapeshellarg((string)$ini) . ' ' . escapeshellarg((string)$lib_path)
-        . ' 2>/dev/null';
-    $decoded = json_decode((string)shell_exec($cmd), true);
+        . ' --config-probe ' . escapeshellarg((string)$ini) . ' ' . escapeshellarg((string)$lib_path);
+    $decoded = json_decode((string)shell_exec($cmd . ' 2>/dev/null'), true);
+    if (is_array($decoded)) { return $decoded; }
 
-    return is_array($decoded) ? $decoded : array();
+    //* No report: run it again keeping stderr and show why, instead of letting
+    //* every later check fail on a missing key with no explanation.
+    echo '  probe did not report (override file: ' . ($ini === '' ? 'none' : basename($ini)) . "):\n";
+    $lines = preg_split('/\R/', trim((string)shell_exec($cmd . ' 2>&1')));
+    foreach (array_slice($lines, 0, 5) as $line) { echo "        $line\n"; }
+
+    return array();
 }
 
 $TMP_FILES = array();
